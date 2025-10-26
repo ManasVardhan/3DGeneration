@@ -3,3 +3,7 @@ Approach : TripoSR + Fine-tuning
 - Fast training
 - Direct mesh output
 - Modify encoder to handle 6 views instead of 1
+
+
+Status :
+- Generated input images

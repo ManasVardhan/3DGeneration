@@ -129,7 +129,11 @@ dmypy.json
 .pyre/
 
 # Project-specific artifacts
-data/
+data/*
+!data/input_images/
+!data/input_images/**
+misc/
+data/Completed/
 *.env
 .env.*
 /*.png
