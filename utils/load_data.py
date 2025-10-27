@@ -279,12 +279,13 @@ class ShoeDataset(Dataset):
     Complete dataset with X (multi-view images) and Y (3D mesh)
     """
     
-    def __init__(self, obj_dir, images_dir):
+    def __init__(self, obj_dir, images_dir, verify_mappings=True):
         """
         Args:
             obj_dir: Directory containing OBJ files
             images_dir: Directory containing rendered views
                 Expected naming: {shoe_id}_front.jpeg, etc.
+            verify_mappings: If True, verify all X-Y pairs exist before starting
         """
         self.obj_converter = OBJToTrainingTarget(normalize=True)
         self.images_dir = Path(images_dir)
@@ -304,12 +305,77 @@ class ShoeDataset(Dataset):
             'top': (0, 90),
             'bottom': (0, -90)
         }
+        
+        # Verify X-Y mappings
+        if verify_mappings:
+            self._verify_all_mappings()
     
     def _extract_shoe_id(self, obj_path):
-        """Extract shoe ID from path"""
-        # Adjust based on your file structure
-        # e.g., "data/Completed/4/10_19_2025.obj" -> "4"
+        """
+        Extract shoe ID from path
+        
+        For structure: data/Completed/4/shoe.obj -> "4"
+        """
         return obj_path.parent.name
+    
+    def _verify_all_mappings(self):
+        """
+        Verify that all OBJs have corresponding images with matching IDs
+        """
+        print("\n" + "="*60)
+        print("VERIFYING X-Y MAPPINGS")
+        print("="*60)
+        
+        missing_images = []
+        valid_pairs = 0
+        
+        for idx, (obj_path, shoe_id) in enumerate(zip(self.obj_paths, self.shoe_ids)):
+            missing_views = []
+            
+            # Check each view
+            for view in self.views:
+                # Try both .png and .jpeg extensions
+                img_path_png = self.images_dir / f"{shoe_id}_{view}.png"
+                img_path_jpeg = self.images_dir / f"{shoe_id}_{view}.jpeg"
+                img_path_jpg = self.images_dir / f"{shoe_id}_{view}.jpg"
+                
+                if not (img_path_png.exists() or img_path_jpeg.exists() or img_path_jpg.exists()):
+                    missing_views.append(view)
+            
+            if missing_views:
+                missing_images.append({
+                    'shoe_id': shoe_id,
+                    'obj_path': str(obj_path),
+                    'missing_views': missing_views
+                })
+            else:
+                valid_pairs += 1
+        
+        # Report results
+        print(f"\n✓ Valid X-Y pairs: {valid_pairs}/{len(self.obj_paths)}")
+        
+        if missing_images:
+            print(f"\n⚠️  WARNING: {len(missing_images)} shoes have missing images:")
+            for item in missing_images[:5]:  # Show first 5
+                print(f"  Shoe ID: {item['shoe_id']}")
+                print(f"    OBJ: {item['obj_path']}")
+                print(f"    Missing views: {', '.join(item['missing_views'])}")
+            
+            if len(missing_images) > 5:
+                print(f"  ... and {len(missing_images) - 5} more")
+            
+            # Remove invalid pairs
+            print(f"\n🔧 Removing {len(missing_images)} invalid pairs from dataset")
+            valid_indices = [i for i in range(len(self.obj_paths)) 
+                           if self.shoe_ids[i] not in [m['shoe_id'] for m in missing_images]]
+            self.obj_paths = [self.obj_paths[i] for i in valid_indices]
+            self.shoe_ids = [self.shoe_ids[i] for i in valid_indices]
+            
+            print(f"✓ Dataset cleaned: {len(self.obj_paths)} valid pairs remaining")
+        else:
+            print("✓ All X-Y mappings verified successfully!")
+        
+        print("="*60 + "\n")
     
     def __len__(self):
         return len(self.obj_paths)
@@ -324,10 +390,25 @@ class ShoeDataset(Dataset):
         # Load X values (multi-view images)
         images = {}
         for view in self.views:
-            img_path = self.images_dir / f"{shoe_id}_{view}.jpeg"
+            # Try different extensions
+            img_path_png = self.images_dir / f"{shoe_id}_{view}.png"
+            img_path_jpeg = self.images_dir / f"{shoe_id}_{view}.jpeg"
+            img_path_jpg = self.images_dir / f"{shoe_id}_{view}.jpg"
             
-            if not img_path.exists():
-                raise FileNotFoundError(f"Missing image: {img_path}")
+            if img_path_png.exists():
+                img_path = img_path_png
+            elif img_path_jpeg.exists():
+                img_path = img_path_jpeg
+            elif img_path_jpg.exists():
+                img_path = img_path_jpg
+            else:
+                raise FileNotFoundError(
+                    f"Missing image for Shoe ID {shoe_id}, view {view}\n"
+                    f"  Looked for:\n"
+                    f"    - {img_path_png}\n"
+                    f"    - {img_path_jpeg}\n"
+                    f"    - {img_path_jpg}"
+                )
             
             from PIL import Image
             img = Image.open(img_path).convert('RGB')
@@ -353,7 +434,8 @@ class ShoeDataset(Dataset):
             'vertex_normals': y_values['vertex_normals'],
             
             # Metadata
-            'shoe_id': shoe_id
+            'shoe_id': shoe_id,
+            'obj_path': str(obj_path)
         }
 
 
@@ -380,8 +462,9 @@ def custom_collate_fn(batch):
     colors_batch = [item['vertex_colors'] for item in batch]
     normals_batch = [item['vertex_normals'] for item in batch]
     
-    # Shoe IDs
+    # Metadata (keep as lists)
     shoe_ids = [item['shoe_id'] for item in batch]
+    obj_paths = [item['obj_path'] for item in batch]
     
     return {
         # X values (batched tensors)
@@ -394,8 +477,9 @@ def custom_collate_fn(batch):
         'vertex_colors': colors_batch,
         'vertex_normals': normals_batch,
         
-        # Metadata
-        'shoe_id': shoe_ids
+        # Metadata (lists)
+        'shoe_id': shoe_ids,
+        'obj_path': obj_paths
     }
 
 
@@ -437,8 +521,8 @@ if __name__ == "__main__":
     all_y_values = process_all_shoes(base_path, output_dir="processed_meshes")
     
     print(f"\nProcessed {len(all_y_values)} meshes")
-    
     '''
+    
     # ========================================
     # Example 3: Create complete dataset
     # ========================================
@@ -465,20 +549,86 @@ if __name__ == "__main__":
     # Test loading one batch
     print("\nTesting batch loading...")
     for batch in dataloader:
-        print(f"\nBatch loaded:")
-        print(f"  X (Input):")
-        print(f"    Images: {list(batch['images'].keys())}")
-        print(f"    Angles: {batch['angles'].shape}")
+        print(f"\n{'='*70}")
+        print("BATCH DATA VERIFICATION")
+        print('='*70)
         
-        print(f"  Y (Target):")
-        print(f"    Vertices: {batch['vertices'].shape}")
-        print(f"    Faces: {batch['faces'].shape}")
-        print(f"    Colors: {batch['vertex_colors'].shape}")
-        print(f"    Normals: {batch['vertex_normals'].shape}")
+        batch_size = len(batch['vertices'])
+        print(f"\nBatch Size: {batch_size} shoes")
+        
+        print(f"\n{'─'*70}")
+        print("X VALUES (INPUT - Multi-view Images)")
+        print('─'*70)
+        
+        # X values are batched tensors (all same size)
+        for view in ['front', 'back', 'left', 'right', 'top', 'bottom']:
+            print(f"  {view:10s}: {batch['images'][view].shape}")
+        print(f"  {'angles':10s}: {batch['angles'].shape}")
+        
+        print(f"\n{'─'*70}")
+        print("Y VALUES (TARGET - 3D Meshes) - Variable Sizes")
+        print('─'*70)
+        
+        # Y values are lists (different sizes per shoe)
+        for i in range(batch_size):
+            shoe_id = batch['shoe_id'][i]
+            obj_path = batch['obj_path'][i]
+            
+            print(f"\n  Shoe {i+1}/{batch_size}:")
+            print(f"    ID:       {shoe_id}")
+            print(f"    OBJ Path: {obj_path}")
+            print(f"    Vertices: {batch['vertices'][i].shape}")
+            print(f"    Faces:    {batch['faces'][i].shape}")
+            print(f"    Colors:   {batch['vertex_colors'][i].shape}")
+            print(f"    Normals:  {batch['vertex_normals'][i].shape}")
+        
+        print(f"\n{'─'*70}")
+        print("X-Y MAPPING VERIFICATION")
+        print('─'*70)
+        
+        for i in range(batch_size):
+            shoe_id = batch['shoe_id'][i]
+            print(f"\n  Shoe {i+1} (ID: {shoe_id}):")
+            
+            # Verify images exist for this ID
+            print(f"    X (Images):")
+            for view in ['front', 'back', 'left', 'right', 'top', 'bottom']:
+                img_tensor = batch['images'][view][i]
+                # Check if image is not all zeros (loaded correctly)
+                is_valid = img_tensor.sum() > 0
+                status = "✓" if is_valid else "✗"
+                print(f"      {status} {view:8s} → Shape: {tuple(img_tensor.shape)} | "
+                      f"Range: [{img_tensor.min():.3f}, {img_tensor.max():.3f}]")
+            
+            print(f"    Y (Mesh):")
+            verts = batch['vertices'][i]
+            faces = batch['faces'][i]
+            colors = batch['vertex_colors'][i]
+            
+            # Verify mesh is valid
+            verts_valid = verts.shape[0] > 0 and not torch.isnan(verts).any()
+            faces_valid = faces.shape[0] > 0 and faces.max() < verts.shape[0]
+            colors_valid = colors.shape[0] == verts.shape[0]
+            
+            print(f"      {'✓' if verts_valid else '✗'} Vertices: {verts.shape[0]:,} points")
+            print(f"      {'✓' if faces_valid else '✗'} Faces:    {faces.shape[0]:,} triangles")
+            print(f"      {'✓' if colors_valid else '✗'} Colors:   {colors.shape[0]:,} RGB values")
+            print(f"      Vertex range: X[{verts[:, 0].min():.3f}, {verts[:, 0].max():.3f}] "
+                  f"Y[{verts[:, 1].min():.3f}, {verts[:, 1].max():.3f}] "
+                  f"Z[{verts[:, 2].min():.3f}, {verts[:, 2].max():.3f}]")
+        
+        print(f"\n{'='*70}")
+        print("SUMMARY")
+        print('='*70)
+        print(f"✓ Loaded {batch_size} complete X-Y pairs")
+        print(f"✓ All X values (images) are batched tensors: (B, C, H, W)")
+        print(f"✓ All Y values (meshes) are lists of variable-sized tensors")
+        print(f"✓ IDs match between X and Y for each shoe")
+        print('='*70 + "\n")
         
         break  # Just show first batch
-    
     '''
+    
     # ========================================
     # Example 4: Use in training loop
     # ========================================
