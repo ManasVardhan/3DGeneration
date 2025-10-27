@@ -1,6 +1,6 @@
-# Project Title
+# MIto3D
 
-One Paragraph of project description goes here
+Generating 3D meshes of shoes from images of shoes from multiple angles
 
 ## Getting Started
 
@@ -78,7 +78,7 @@ We use [SemVer](http://semver.org/) for versioning. For the versions available, 
 
 ## Authors
 
-* **Atharva Gundawar** - *Initial work* - [Github handle](https://github.com/Atharva-Gundawar)
+* **Manas Vardhan** - *Initial work* - [Github handle](https://github.com/Manas-Vardhan)
 
 See also the list of [contributors](https://github.com/your/project/contributors) who participated in this project.
 

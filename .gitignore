@@ -137,3 +137,5 @@ data/Completed/
 *.env
 .env.*
 /*.png
+
+.DS_Store

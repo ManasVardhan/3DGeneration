@@ -6,4 +6,5 @@ Approach : TripoSR + Fine-tuning
 
 
 Status :
-- Generated input images
+- Generated input images -> create_input_images.py
+
