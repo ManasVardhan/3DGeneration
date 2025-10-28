@@ -11,7 +11,14 @@ These instructions will get you a copy of the project up and running on your loc
 What things you need to install the software and how to install them
 
 ```
-Give examples
+## Installation
+
+1. Clone this repo
+2. Clone TripoSR separately:
+```bash
+   git clone https://github.com/VAST-AI-Research/TripoSR.git
+   cd TripoSR
+   pip install -e .
 ```
 
 ### Installing
