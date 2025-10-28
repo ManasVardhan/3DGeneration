@@ -22,24 +22,24 @@ class Config:
     output_dir = "output"
     
     # ========================================================================
-    # TripoSR Settings
+    # Model Architecture Settings
     # ========================================================================
-    triposr_model = "stabilityai/TripoSR"  # Pretrained model to download
-    mesh_resolution = 256  # Resolution for marching cubes (128, 256, or 512)
-                          # Higher = more detailed but slower
-                          # 128: Fast, lower quality
-                          # 256: Balanced (recommended)
-                          # 512: Slow, highest quality
+    # Geometry model
+    num_points = 4096  # Number of 3D points to predict
+                       # 2048: Faster, lower quality
+                       # 4096: Balanced (recommended)
+                       # 8192: Slower, higher quality
     
-    # ========================================================================
+    hidden_dim = 1024  # Hidden layer size
+    
     # Stage 1: Geometry Training Settings
     # ========================================================================
     # Model architecture
     freeze_image_encoder = False  # Set True to freeze DINOv2 (faster, less memory)
                                  # False: Fine-tune everything (better quality)
-                                 # True: Only train multi-view adapter (faster)
+                                 # True: Only train decoder (faster)
     
-    feature_dim = 1024  # TripoSR's feature dimension (don't change)
+    feature_dim = 768  # DINOv2-base feature dimension (don't change)
     num_views = 6       # Number of views (don't change)
     
     # Training hyperparameters

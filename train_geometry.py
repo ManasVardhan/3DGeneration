@@ -13,7 +13,7 @@ import json
 
 # Import project modules
 from config import config
-from models.geometry_model import MultiViewTripoSR, geometry_loss
+from models.geometry_model import GeometryModel, geometry_loss
 from load_data import ShoeDataset, custom_collate_fn
 
 
@@ -56,9 +56,10 @@ class GeometryTrainer:
         
         # Initialize model
         print("\nInitializing model...")
-        self.model = MultiViewTripoSR(
-            pretrained_model_path=config.triposr_model,
-            freeze_encoder=config.freeze_image_encoder
+        self.model = GeometryModel(
+            num_points=config.num_points,
+            freeze_encoder=config.freeze_image_encoder,
+            hidden_dim=config.hidden_dim
         ).to(config.device)
         
         total_params, trainable_params = self.model.count_parameters()
@@ -84,6 +85,17 @@ class GeometryTrainer:
         self.patience_counter = 0
         self.train_history = {'epoch': [], 'loss': [], 'lr': []}
     
+    def _sample_points(self, vertices, num_samples):
+        """Randomly sample points from vertices"""
+        num_verts = vertices.shape[0]
+        if num_verts >= num_samples:
+            indices = torch.randperm(num_verts)[:num_samples]
+            return vertices[indices]
+        else:
+            # If not enough vertices, repeat some
+            indices = torch.randint(0, num_verts, (num_samples,))
+            return vertices[indices]
+    
     def train_epoch(self, epoch):
         """Train for one epoch"""
         self.model.train()
@@ -105,16 +117,13 @@ class GeometryTrainer:
                 images_single = {k: v[i:i+1] for k, v in images.items()}
                 angles_single = angles[i:i+1]
                 
-                triplane = self.model(images_single, angles_single)
+                pred_points = self.model(images_single, angles_single)
                 
-                # Extract mesh
-                pred_vertices, pred_faces = self.model.extract_mesh(
-                    triplane,
-                    resolution=self.config.mesh_resolution
-                )
+                # Sample GT vertices to match prediction size
+                gt_vertices_sample = self._sample_points(gt_vertices, self.config.num_points)
                 
                 # Compute loss
-                loss, loss_dict = geometry_loss(pred_vertices, pred_faces, gt_vertices)
+                loss, loss_dict = geometry_loss(pred_points[0], gt_vertices_sample)
                 batch_loss += loss
             
             # Average loss over batch
@@ -188,7 +197,7 @@ class GeometryTrainer:
                 self.patience_counter = 0
                 
                 # Save best model
-                best_path = Path(self.config.checkpoint_dir) / "triposr_mv_best.pth"
+                best_path = Path(self.config.checkpoint_dir) / "geometry_best.pth"
                 torch.save(self.model.state_dict(), best_path)
                 print(f"✓ Best model saved: {best_path} (Loss: {avg_loss:.6f})\n")
             else:
@@ -209,7 +218,7 @@ class GeometryTrainer:
         print("="*70)
         print(f"Total time: {hours}h {minutes}m")
         print(f"Best loss: {self.best_loss:.6f}")
-        print(f"Final model: {self.config.checkpoint_dir}/triposr_mv_best.pth")
+        print(f"Final model: {self.config.checkpoint_dir}/geometry_best.pth")
         print("="*70)
         
         # Save training history

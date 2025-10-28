@@ -16,7 +16,7 @@ import json
 
 # Import project modules
 from config import config
-from models.geometry_model import MultiViewTripoSR
+from models.geometry_model import GeometryModel
 from models.texture_model import VertexColorPredictor, texture_loss, match_vertex_counts
 from load_data import ShoeDataset, custom_collate_fn
 
@@ -128,11 +128,10 @@ class TextureTrainer:
                 angles_single = angles[i:i+1]
                 
                 with torch.no_grad():
-                    triplane = self.geometry_model(images_single, angles_single)
-                    pred_vertices, pred_faces = self.geometry_model.extract_mesh(
-                        triplane,
-                        resolution=self.config.mesh_resolution
-                    )
+                    pred_points = self.geometry_model(images_single, angles_single)
+                    # Extract mesh from points
+                    pred_vertices, pred_faces = self.geometry_model.extract_mesh(pred_points)
+                    pred_vertices = torch.from_numpy(pred_vertices).float().to(self.config.device)
                 
                 # Predict colors
                 pred_colors = self.texture_model(pred_vertices, images_single)
@@ -263,7 +262,7 @@ def main():
     print("="*70)
     
     # Check if geometry model exists
-    geometry_checkpoint = Path(config.checkpoint_dir) / "triposr_mv_best.pth"
+    geometry_checkpoint = Path(config.checkpoint_dir) / "geometry_best.pth"
     if not geometry_checkpoint.exists():
         print("\n❌ ERROR: Geometry model not found!")
         print(f"   Expected: {geometry_checkpoint}")

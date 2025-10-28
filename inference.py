@@ -1,51 +1,54 @@
 """
-Inference Script: Generate 3D textured meshes from multi-view images
+Inference Script
+Generate 3D textured meshes from multi-view images
 """
 
 import torch
 import trimesh
 import numpy as np
-from PIL import Image
+import argparse
 from pathlib import Path
+from PIL import Image
 import torchvision.transforms as transforms
 
-# Import models from training script
-from train import GeometryModel, TextureModel, Config
+from config import config
+from models.geometry_model import GeometryModel
+from models.texture_model import VertexColorPredictor
 
 
 class MeshGenerator:
     """Generate 3D meshes from multi-view images"""
     
-    def __init__(self, geometry_checkpoint, texture_checkpoint, config):
+    def __init__(self, geometry_checkpoint, texture_checkpoint):
         """
         Args:
             geometry_checkpoint: Path to trained geometry model
             texture_checkpoint: Path to trained texture model
-            config: Config object
         """
         self.config = config
         self.device = config.device
         
-        # Load models
         print("Loading models...")
-        self.geometry_model = GeometryModel(
-            feature_dim=config.feature_dim,
-            num_points=2048
+        
+        # Load geometry model
+        self.geometry_model = MultiViewTripoSR(
+            pretrained_model_path=config.triposr_model,
+            freeze_encoder=True
         ).to(self.device)
         
-        self.texture_model = TextureModel(
-            feature_dim=config.feature_dim,
-            num_points=2048
-        ).to(self.device)
-        
-        # Load weights
-        self.geometry_model.load_state_dict(torch.load(geometry_checkpoint, map_location=self.device))
-        self.texture_model.load_state_dict(torch.load(texture_checkpoint, map_location=self.device))
-        
+        self.geometry_model.load_state_dict(
+            torch.load(geometry_checkpoint, map_location=self.device)
+        )
         self.geometry_model.eval()
-        self.texture_model.eval()
+        print("✓ Geometry model loaded")
         
-        print("✓ Models loaded successfully")
+        # Load texture model
+        self.texture_model = VertexColorPredictor().to(self.device)
+        self.texture_model.load_state_dict(
+            torch.load(texture_checkpoint, map_location=self.device)
+        )
+        self.texture_model.eval()
+        print("✓ Texture model loaded")
         
         # Image preprocessing
         self.transform = transforms.Compose([
@@ -53,7 +56,7 @@ class MeshGenerator:
             transforms.ToTensor(),
         ])
     
-    def load_multi_view_images(self, image_dir, shoe_id):
+    def load_images(self, image_dir, shoe_id):
         """
         Load 6 view images for a shoe
         
@@ -62,7 +65,7 @@ class MeshGenerator:
             shoe_id: Shoe ID (e.g., "17")
         
         Returns:
-            images_dict: Dict of tensors (1, 3, H, W)
+            images_dict: Dict of tensors
             angles: Tensor (1, 6, 2)
         """
         views = ['front', 'back', 'left', 'right', 'top', 'bottom']
@@ -88,7 +91,9 @@ class MeshGenerator:
                     break
             
             if img_path is None:
-                raise FileNotFoundError(f"Image not found for shoe {shoe_id}, view {view}")
+                raise FileNotFoundError(
+                    f"Image not found: {image_dir}/{shoe_id}_{view}.[png|jpeg|jpg]"
+                )
             
             # Load and transform
             img = Image.open(img_path).convert('RGB')
@@ -101,112 +106,131 @@ class MeshGenerator:
         
         return images_dict, angles
     
-    def generate_mesh(self, images_dict, angles):
+    def generate(self, images_dict, angles, resolution=256):
         """
-        Generate 3D mesh from multi-view images
+        Generate 3D mesh from images
         
         Args:
             images_dict: Dict of image tensors
-            angles: View angles tensor
+            angles: View angles
+            resolution: Mesh resolution (higher = more detailed)
         
         Returns:
             vertices: (N, 3) numpy array
-            colors: (N, 3) numpy array
+            faces: (F, 3) numpy array
+            colors: (N, 3) numpy array [0, 1]
         """
         with torch.no_grad():
+            print("  Predicting geometry...")
             # Stage 1: Predict geometry
-            points = self.geometry_model(images_dict, angles)  # (1, N, 3)
+            triplane = self.geometry_model(images_dict, angles)
+            vertices, faces = self.geometry_model.extract_mesh(triplane, resolution=resolution)
             
+            print(f"  Generated mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
+            
+            print("  Predicting colors...")
             # Stage 2: Predict colors
-            colors = self.texture_model(points, images_dict)  # (1, N, 3)
+            colors = self.texture_model(vertices, images_dict)
             
             # Convert to numpy
-            vertices = points[0].cpu().numpy()
-            colors = colors[0].cpu().numpy()
+            vertices_np = vertices.cpu().numpy()
+            faces_np = faces.cpu().numpy()
+            colors_np = colors.cpu().numpy()
         
-        return vertices, colors
+        return vertices_np, faces_np, colors_np
     
-    def save_point_cloud(self, vertices, colors, output_path):
-        """Save as point cloud (OBJ or PLY)"""
+    def save_mesh(self, vertices, faces, colors, output_path):
+        """Save textured mesh to file"""
         # Scale colors to 0-255
         colors_255 = (colors * 255).astype(np.uint8)
         
-        # Create point cloud
-        cloud = trimesh.PointCloud(vertices, colors=colors_255)
+        # Create mesh
+        mesh = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            vertex_colors=colors_255
+        )
         
         # Save
-        cloud.export(output_path)
-        print(f"✓ Point cloud saved: {output_path}")
-    
-    def save_mesh_with_poisson(self, vertices, colors, output_path):
-        """
-        Save as mesh using Poisson surface reconstruction
-        Requires Open3D
-        """
-        try:
-            import open3d as o3d
-            
-            # Create Open3D point cloud
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(vertices)
-            pcd.colors = o3d.utility.Vector3dVector(colors)
-            
-            # Estimate normals
-            pcd.estimate_normals(
-                search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
-            )
-            
-            # Poisson surface reconstruction
-            print("  Running Poisson surface reconstruction...")
-            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                pcd, depth=9
-            )
-            
-            # Remove low density vertices
-            vertices_to_remove = densities < np.quantile(densities, 0.1)
-            mesh.remove_vertices_by_mask(vertices_to_remove)
-            
-            # Save
-            o3d.io.write_triangle_mesh(str(output_path), mesh)
-            print(f"✓ Mesh saved: {output_path}")
-            
-        except ImportError:
-            print("⚠️  Open3D not installed. Saving as point cloud instead.")
-            self.save_point_cloud(vertices, colors, output_path)
+        mesh.export(output_path)
+        print(f"✓ Mesh saved: {output_path}")
 
 
-# ============================================================================
-# Usage Examples
-# ============================================================================
-
-def generate_single_shoe(shoe_id, image_dir, output_dir):
-    """Generate mesh for a single shoe"""
+def main():
+    parser = argparse.ArgumentParser(description="Generate 3D mesh from multi-view images")
+    parser.add_argument('--shoe_id', type=str, required=True, help='Shoe ID (e.g., 17)')
+    parser.add_argument('--image_dir', type=str, default=None, help='Directory with images')
+    parser.add_argument('--output', type=str, default=None, help='Output mesh path')
+    parser.add_argument('--resolution', type=int, default=256, help='Mesh resolution (128/256/512)')
+    parser.add_argument('--geometry_model', type=str, default=None, help='Geometry checkpoint')
+    parser.add_argument('--texture_model', type=str, default=None, help='Texture checkpoint')
     
-    # Configuration
-    config = Config()
+    args = parser.parse_args()
     
-    # Paths to trained models
-    geometry_checkpoint = "checkpoints/stage1_best.pth"
-    texture_checkpoint = "checkpoints/stage2_best.pth"
+    # Default paths
+    image_dir = args.image_dir or config.images_dir
+    geometry_checkpoint = args.geometry_model or config.geometry_checkpoint
+    texture_checkpoint = args.texture_model or config.texture_checkpoint
+    output_path = args.output or f"output/shoe_{args.shoe_id}_generated.obj"
+    
+    # Create output directory
+    Path(output_path).parent.mkdir(exist_ok=True, parents=True)
+    
+    print("="*70)
+    print("3D MESH GENERATION")
+    print("="*70)
+    print(f"Shoe ID: {args.shoe_id}")
+    print(f"Image Dir: {image_dir}")
+    print(f"Resolution: {args.resolution}")
+    print(f"Output: {output_path}")
+    print("="*70 + "\n")
+    
+    # Check if models exist
+    if not Path(geometry_checkpoint).exists():
+        print(f"❌ Geometry model not found: {geometry_checkpoint}")
+        print("   Please train the model first: python train_geometry.py")
+        return
+    
+    if not Path(texture_checkpoint).exists():
+        print(f"❌ Texture model not found: {texture_checkpoint}")
+        print("   Please train the model first: python train_texture.py")
+        return
     
     # Initialize generator
-    generator = MeshGenerator(geometry_checkpoint, texture_checkpoint, config)
+    generator = MeshGenerator(geometry_checkpoint, texture_checkpoint)
     
     # Load images
-    print(f"\nGenerating mesh for shoe ID: {shoe_id}")
-    images_dict, angles = generator.load_multi_view_images(image_dir, shoe_id)
-    print("✓ Images loaded")
+    print(f"Loading images for shoe {args.shoe_id}...")
+    try:
+        images_dict, angles = generator.load_images(image_dir, args.shoe_id)
+        print("✓ Images loaded\n")
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return
     
     # Generate mesh
     print("Generating 3D mesh...")
-    vertices, colors = generator.generate_mesh(images_dict, angles)
-    print(f"✓ Generated {len(vertices)} points")
+    vertices, faces, colors = generator.generate(images_dict, angles, resolution=args.resolution)
+    print("✓ Generation complete\n")
     
-    # Save output
-    Path(output_dir).mkdir(exist_ok=True)
+    # Save mesh
+    print("Saving mesh...")
+    generator.save_mesh(vertices, faces, colors, output_path)
     
-    # Save as point cloud
-    output_path = Path(output_dir) / f"shoe_{shoe_id}_pointcloud.ply"
-    generator.save_point_cloud(vertices, colors, output_path)
-    
-    # Try to save as
+    print("\n" + "="*70)
+    print("GENERATION COMPLETE")
+    print("="*70)
+    print(f"Output: {output_path}")
+    print("\nMesh statistics:")
+    print(f"  Vertices: {len(vertices):,}")
+    print(f"  Faces: {len(faces):,}")
+    print(f"  Has colors: Yes")
+    print("\nView mesh in:")
+    print("  - Blender")
+    print("  - MeshLab")
+    print("  - https://3dviewer.net/")
+    print("="*70)
+
+
+if __name__ == "__main__":
+    main()

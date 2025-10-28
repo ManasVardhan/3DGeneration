@@ -1,245 +1,399 @@
 """
-Stage 1: Geometry Model
-Multi-View TripoSR for 3D Shape Prediction
+Stage 1: Geometry Model (TripoSR-Free Version)
+Multi-View to 3D Point Cloud/Mesh Prediction
+
+Uses only standard packages:
+- PyTorch
+- Transformers (DINOv2)
+- Trimesh
 """
 
 import torch
 import torch.nn as nn
-
-try:
-    from TripoSR.tsr.system import TSR
-except ImportError:
-    print("ERROR: TripoSR not installed!")
-    print("Install with: pip install git+https://github.com/VAST-AI-Research/TripoSR.git")
-    exit(1)
+import numpy as np
+from transformers import AutoModel, AutoImageProcessor
 
 
-class MultiViewTripoSR(nn.Module):
+class MultiViewImageEncoder(nn.Module):
     """
-    Adapt TripoSR to handle 6 views instead of 1
-    
-    Architecture:
-        6 Images (512×512) 
-        → DINOv2 Encoder (per view)
-        → Multi-View Aggregation (attention)
-        → TripoSR Transformer
-        → Triplane Generator
-        → Mesh Extraction (marching cubes)
+    Encode images using DINOv2 (pretrained vision transformer)
     """
     
-    def __init__(self, pretrained_model_path="stabilityai/TripoSR", freeze_encoder=False):
+    def __init__(self, model_name='facebook/dinov2-base', freeze=False):
         super().__init__()
         
-        print(f"Loading TripoSR from {pretrained_model_path}...")
+        print(f"Loading {model_name}...")
+        self.image_processor = AutoImageProcessor.from_pretrained(model_name)
+        self.encoder = AutoModel.from_pretrained(model_name)
+        self.feature_dim = self.encoder.config.hidden_size  # 768 for base
+        print(f"✓ DINOv2 loaded (feature dim: {self.feature_dim})")
         
-        # Load pretrained TripoSR
-        self.base_model = TSR.from_pretrained(
-            pretrained_model_path,
-            config_name="config.yaml",
-            weight_name="model.ckpt"
-        )
-        print("✓ TripoSR loaded successfully")
-        
-        # Get TripoSR components
-        self.image_tokenizer = self.base_model.image_tokenizer  # DINOv2 encoder
-        self.tokenizer = self.base_model.tokenizer  # Transformer
-        self.backbone = self.base_model.backbone  # Triplane decoder
-        self.post_processor = self.base_model.post_processor  # Mesh extraction
-        self.renderer = self.base_model.renderer
-        
-        # Freeze image encoder if requested
-        if freeze_encoder:
-            print("Freezing image encoder (DINOv2)...")
-            for param in self.image_tokenizer.parameters():
+        if freeze:
+            print("  Freezing encoder weights...")
+            for param in self.encoder.parameters():
                 param.requires_grad = False
+    
+    def forward(self, images):
+        """
+        Args:
+            images: (B, 3, H, W) RGB images
+        Returns:
+            features: (B, feature_dim) image features
+        """
+        # DINOv2 forward pass
+        outputs = self.encoder(pixel_values=images)
         
-        # Multi-view aggregation layer
-        self.view_aggregator = nn.MultiheadAttention(
-            embed_dim=1024,  # TripoSR token dimension
+        # Get CLS token (global image representation)
+        features = outputs.last_hidden_state[:, 0]  # (B, 768)
+        
+        return features
+
+
+class ViewAggregator(nn.Module):
+    """
+    Aggregate features from 6 views using attention
+    """
+    
+    def __init__(self, feature_dim=768):
+        super().__init__()
+        
+        # View positional encoding
+        self.view_pos_encoder = nn.Sequential(
+            nn.Linear(2, 128),  # (azimuth, elevation)
+            nn.ReLU(),
+            nn.Linear(128, feature_dim)
+        )
+        
+        # Multi-head attention for aggregation
+        self.attention = nn.MultiheadAttention(
+            embed_dim=feature_dim,
             num_heads=8,
             batch_first=True
         )
         
-        # Learnable query token for aggregation
-        self.query_token = nn.Parameter(torch.randn(1, 1, 1024))
+        # Learnable query for global features
+        self.query = nn.Parameter(torch.randn(1, 1, feature_dim))
+    
+    def forward(self, view_features, view_angles):
+        """
+        Args:
+            view_features: (B, num_views, feature_dim)
+            view_angles: (B, num_views, 2) - (azimuth, elevation) in degrees
+        Returns:
+            aggregated: (B, feature_dim)
+        """
+        B, num_views, _ = view_features.shape
         
-        # View angle positional encoding
-        self.view_pos_encoder = nn.Sequential(
-            nn.Linear(2, 128),
+        # Add positional encoding based on view angles
+        pos_encoding = self.view_pos_encoder(view_angles)  # (B, num_views, feature_dim)
+        view_features = view_features + pos_encoding
+        
+        # Aggregate using attention
+        query = self.query.expand(B, -1, -1)  # (B, 1, feature_dim)
+        aggregated, _ = self.attention(query, view_features, view_features)
+        
+        return aggregated.squeeze(1)  # (B, feature_dim)
+
+
+class PointCloudDecoder(nn.Module):
+    """
+    Decode aggregated features into 3D point cloud
+    """
+    
+    def __init__(self, feature_dim=768, num_points=4096, hidden_dim=1024):
+        super().__init__()
+        
+        self.num_points = num_points
+        
+        # MLP decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(128, 1024)
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.1),
+            
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim * 2),
+            nn.Dropout(0.1),
+            
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim * 2),
+            
+            nn.Linear(hidden_dim * 2, num_points * 3)
         )
     
-    def encode_views(self, images_dict, view_angles):
+    def forward(self, features):
         """
-        Encode 6 views with TripoSR's image encoder
-        
         Args:
-            images_dict: Dict with 6 views, each (B, 3, H, W)
-            view_angles: (B, 6, 2) - azimuth, elevation in degrees
-        
+            features: (B, feature_dim)
         Returns:
-            tokens: (B, 6, num_tokens, 1024)
+            points: (B, num_points, 3) - 3D coordinates
         """
-        B = images_dict['front'].shape[0]
-        view_names = ['front', 'back', 'left', 'right', 'top', 'bottom']
+        B = features.shape[0]
         
-        all_tokens = []
+        # Decode to flat point coordinates
+        points_flat = self.decoder(features)  # (B, num_points * 3)
         
-        for i, view_name in enumerate(view_names):
-            # Encode this view with DINOv2
-            img = images_dict[view_name]  # (B, 3, H, W)
-            tokens = self.image_tokenizer(img)  # (B, num_tokens, 1024)
-            
-            # Add positional encoding for view angle
-            angle = view_angles[:, i, :]  # (B, 2)
-            pos_emb = self.view_pos_encoder(angle).unsqueeze(1)  # (B, 1, 1024)
-            tokens = tokens + pos_emb  # Broadcast to all tokens
-            
-            all_tokens.append(tokens)
+        # Reshape to point cloud
+        points = points_flat.view(B, self.num_points, 3)
         
-        # Stack all views: (B, 6, num_tokens, 1024)
-        all_tokens = torch.stack(all_tokens, dim=1)
+        # Normalize to [-1, 1] range
+        points = torch.tanh(points)
         
-        return all_tokens
+        return points
+
+
+class GeometryModel(nn.Module):
+    """
+    Complete Geometry Model: 6 Images → 3D Point Cloud
     
-    def aggregate_views(self, view_tokens):
-        """
-        Aggregate 6 views into single representation using attention
+    Architecture:
+        6 Images → DINOv2 Encoder → View Aggregation → Point Cloud Decoder
+    """
+    
+    def __init__(self, 
+                 num_points=4096,
+                 freeze_encoder=False,
+                 hidden_dim=1024):
+        super().__init__()
         
-        Args:
-            view_tokens: (B, 6, num_tokens, 1024)
+        print("="*70)
+        print("INITIALIZING GEOMETRY MODEL")
+        print("="*70)
         
-        Returns:
-            aggregated: (B, num_tokens, 1024)
-        """
-        B, num_views, num_tokens, dim = view_tokens.shape
+        # Image encoder (DINOv2)
+        self.image_encoder = MultiViewImageEncoder(
+            model_name='facebook/dinov2-base',
+            freeze=freeze_encoder
+        )
+        feature_dim = self.image_encoder.feature_dim
         
-        # Reshape for attention: (B, 6*num_tokens, 1024)
-        tokens_flat = view_tokens.reshape(B, num_views * num_tokens, dim)
+        # View aggregator
+        self.view_aggregator = ViewAggregator(feature_dim=feature_dim)
         
-        # Use attention to aggregate
-        query = self.query_token.expand(B, num_tokens, -1)  # (B, num_tokens, 1024)
-        aggregated, _ = self.view_aggregator(query, tokens_flat, tokens_flat)
+        # Point cloud decoder
+        self.point_decoder = PointCloudDecoder(
+            feature_dim=feature_dim,
+            num_points=num_points,
+            hidden_dim=hidden_dim
+        )
         
-        return aggregated  # (B, num_tokens, 1024)
+        self.num_points = num_points
+        
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        print(f"✓ Model initialized")
+        print(f"  Output: {num_points} 3D points")
+        print(f"  Total parameters: {total_params:,}")
+        print(f"  Trainable parameters: {trainable_params:,}")
+        print("="*70)
     
     def forward(self, images_dict, view_angles):
         """
-        Full forward pass: 6 images → 3D triplane
+        Forward pass: 6 images → 3D point cloud
         
         Args:
             images_dict: Dict with keys ['front', 'back', 'left', 'right', 'top', 'bottom']
-                         Each value is (B, 3, 512, 512)
+                         Each value is (B, 3, H, W)
             view_angles: (B, 6, 2) - (azimuth, elevation) for each view
         
         Returns:
-            triplane: Triplane representation for mesh extraction
+            points: (B, num_points, 3) - 3D point cloud
         """
-        # Step 1: Encode all 6 views
-        view_tokens = self.encode_views(images_dict, view_angles)
+        B = images_dict['front'].shape[0]
         
-        # Step 2: Aggregate views
-        aggregated_tokens = self.aggregate_views(view_tokens)
+        # Encode each view
+        view_features = []
+        for view_name in ['front', 'back', 'left', 'right', 'top', 'bottom']:
+            img = images_dict[view_name]  # (B, 3, H, W)
+            feat = self.image_encoder(img)  # (B, feature_dim)
+            view_features.append(feat)
         
-        # Step 3: Pass through TripoSR's transformer
-        latents = self.tokenizer(aggregated_tokens)
+        # Stack: (B, 6, feature_dim)
+        view_features = torch.stack(view_features, dim=1)
         
-        # Step 4: Generate triplane
-        triplane = self.backbone(latents)
+        # Aggregate views
+        aggregated = self.view_aggregator(view_features, view_angles)  # (B, feature_dim)
         
-        return triplane
+        # Decode to point cloud
+        points = self.point_decoder(aggregated)  # (B, num_points, 3)
+        
+        return points
     
-    def extract_mesh(self, triplane, resolution=256):
+    def extract_mesh(self, points, method='alpha_shape'):
         """
-        Extract mesh from triplane using marching cubes
+        Convert point cloud to mesh using surface reconstruction
         
         Args:
-            triplane: Triplane representation from forward()
-            resolution: Grid resolution (128, 256, or 512)
+            points: (N, 3) numpy array or (B, N, 3) tensor
+            method: 'alpha_shape', 'poisson', or 'ball_pivot'
         
         Returns:
-            vertices: (N, 3) torch.Tensor
-            faces: (F, 3) torch.Tensor
+            vertices: (M, 3) numpy array
+            faces: (F, 3) numpy array
         """
-        # Use TripoSR's mesh extraction
-        with torch.no_grad():
-            mesh = self.post_processor(triplane, resolution=resolution)
+        import trimesh
         
-        vertices = mesh['vertices']
-        faces = mesh['faces']
+        # Convert to numpy if tensor
+        if torch.is_tensor(points):
+            if points.dim() == 3:
+                points = points[0]  # Take first batch
+            points = points.detach().cpu().numpy()
         
-        return vertices, faces
+        # Create point cloud
+        cloud = trimesh.PointCloud(points)
+        
+        try:
+            if method == 'alpha_shape':
+                # Alpha shape (fast, works well for dense clouds)
+                mesh = cloud.convex_hull
+                
+            elif method == 'poisson':
+                # Poisson reconstruction (requires Open3D)
+                try:
+                    import open3d as o3d
+                    pcd = o3d.geometry.PointCloud()
+                    pcd.points = o3d.utility.Vector3dVector(points)
+                    pcd.estimate_normals()
+                    mesh_o3d, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+                    
+                    vertices = np.asarray(mesh_o3d.vertices)
+                    faces = np.asarray(mesh_o3d.triangles)
+                    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                except ImportError:
+                    print("  Warning: Open3D not available, using convex hull")
+                    mesh = cloud.convex_hull
+            
+            else:
+                # Default to convex hull
+                mesh = cloud.convex_hull
+            
+            vertices = mesh.vertices
+            faces = mesh.faces
+            
+            return vertices, faces
+            
+        except Exception as e:
+            print(f"  Warning: Mesh extraction failed ({e}), returning point cloud")
+            # Return points as "mesh" with no faces
+            return points, np.array([])
     
     def get_trainable_parameters(self):
-        """Get list of trainable parameters (for optimizer)"""
+        """Get trainable parameters for optimizer"""
         return [p for p in self.parameters() if p.requires_grad]
     
     def count_parameters(self):
-        """Count total and trainable parameters"""
+        """Count parameters"""
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return total, trainable
 
 
 # ============================================================================
-# Loss Functions for Geometry
+# Loss Functions
 # ============================================================================
 
-def chamfer_distance_pytorch3d(pred_verts, gt_verts):
+def chamfer_distance_simple(pred_points, gt_points):
     """
-    Chamfer distance using PyTorch3D (if available)
-    """
-    try:
-        from pytorch3d.loss import chamfer_distance
-        loss, _ = chamfer_distance(
-            pred_verts.unsqueeze(0),
-            gt_verts.unsqueeze(0)
-        )
-        return loss
-    except ImportError:
-        return chamfer_distance_simple(pred_verts, gt_verts)
-
-
-def chamfer_distance_simple(pred_verts, gt_verts):
-    """Simplified Chamfer distance (no PyTorch3D required)"""
-    pred_exp = pred_verts.unsqueeze(1)  # (N, 1, 3)
-    gt_exp = gt_verts.unsqueeze(0)  # (1, M, 3)
+    Simplified Chamfer Distance (no external dependencies)
     
+    Args:
+        pred_points: (N, 3) predicted points
+        gt_points: (M, 3) ground truth points
+    
+    Returns:
+        loss: scalar
+    """
+    # Expand for broadcasting
+    pred_exp = pred_points.unsqueeze(1)  # (N, 1, 3)
+    gt_exp = gt_points.unsqueeze(0)  # (1, M, 3)
+    
+    # Compute all pairwise distances
     dist = torch.sum((pred_exp - gt_exp) ** 2, dim=-1)  # (N, M)
     
+    # Forward: nearest neighbor from pred to gt
     min_dist_pred = torch.min(dist, dim=1)[0]  # (N,)
     forward_loss = torch.mean(min_dist_pred)
     
+    # Backward: nearest neighbor from gt to pred
     min_dist_gt = torch.min(dist, dim=0)[0]  # (M,)
     backward_loss = torch.mean(min_dist_gt)
     
     return forward_loss + backward_loss
 
 
-def normal_consistency_loss(pred_verts, pred_faces):
-    """Encourage smooth surfaces"""
+def chamfer_distance_pytorch3d(pred_points, gt_points):
+    """
+    Chamfer distance using PyTorch3D (if available)
+    Falls back to simple version if not installed
+    """
     try:
-        from pytorch3d.structures import Meshes
-        from pytorch3d.loss import mesh_normal_consistency
-        
-        mesh = Meshes(verts=[pred_verts], faces=[pred_faces])
-        loss = mesh_normal_consistency(mesh)
+        from pytorch3d.loss import chamfer_distance
+        loss, _ = chamfer_distance(
+            pred_points.unsqueeze(0),
+            gt_points.unsqueeze(0)
+        )
         return loss
-    except:
-        return torch.tensor(0.0, device=pred_verts.device)
+    except ImportError:
+        return chamfer_distance_simple(pred_points, gt_points)
 
 
-def geometry_loss(pred_verts, pred_faces, gt_verts, lambda_chamfer=1.0, lambda_normal=0.01):
-    """Combined geometry loss"""
-    loss_chamfer = chamfer_distance_pytorch3d(pred_verts, gt_verts)
-    loss_normal = normal_consistency_loss(pred_verts, pred_faces)
+def earth_mover_distance(pred_points, gt_points):
+    """
+    Approximation of Earth Mover's Distance
+    More expensive but better quality than Chamfer
+    """
+    # Simplified EMD using Hungarian algorithm approximation
+    # This is just Chamfer for now, can be improved
+    return chamfer_distance_simple(pred_points, gt_points)
+
+
+def coverage_loss(pred_points, gt_points, threshold=0.01):
+    """
+    Penalize if predicted points don't cover ground truth surface
+    """
+    pred_exp = pred_points.unsqueeze(1)  # (N, 1, 3)
+    gt_exp = gt_points.unsqueeze(0)  # (1, M, 3)
     
-    total_loss = lambda_chamfer * loss_chamfer + lambda_normal * loss_normal
+    dist = torch.sum((pred_exp - gt_exp) ** 2, dim=-1)  # (N, M)
+    min_dist_to_pred = torch.min(dist, dim=0)[0]  # (M,)
+    
+    # Percentage of GT points covered (within threshold)
+    covered = (min_dist_to_pred < threshold).float().mean()
+    
+    # Loss: want high coverage (minimize 1 - covered)
+    return 1.0 - covered
+
+
+def geometry_loss(pred_points, gt_points, lambda_chamfer=1.0, lambda_coverage=0.1):
+    """
+    Combined geometry loss
+    
+    Args:
+        pred_points: (N, 3) predicted point cloud
+        gt_points: (M, 3) ground truth vertices
+        lambda_chamfer: Weight for Chamfer distance
+        lambda_coverage: Weight for coverage loss
+    
+    Returns:
+        total_loss: Weighted sum
+        loss_dict: Individual losses
+    """
+    # Main Chamfer distance
+    loss_chamfer = chamfer_distance_pytorch3d(pred_points, gt_points)
+    
+    # Coverage loss (ensure we cover the GT surface)
+    loss_cover = coverage_loss(pred_points, gt_points)
+    
+    # Total loss
+    total_loss = lambda_chamfer * loss_chamfer + lambda_coverage * loss_cover
     
     loss_dict = {
         'chamfer': loss_chamfer.item(),
-        'normal': loss_normal.item() if isinstance(loss_normal, torch.Tensor) else 0.0,
+        'coverage': loss_cover.item(),
         'total': total_loss.item()
     }
     
