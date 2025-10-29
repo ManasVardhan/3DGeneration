@@ -74,7 +74,7 @@ def test_config():
         if not obj_dir.exists():
             print(f"    ⚠️  Warning: OBJ directory does not exist!")
         else:
-            obj_files = list(obj_dir.glob("*.obj"))
+            obj_files = list(obj_dir.rglob("*.obj"))
             print(f"    ✓ Found {len(obj_files)} OBJ files")
 
         print(f"    Images dir: {images_dir}")
@@ -123,7 +123,6 @@ def test_dataset_loading():
         print(f"    Vertices shape: {sample['vertices'].shape}")
         print(f"    Faces shape: {sample['faces'].shape}")
         print(f"    Colors shape: {sample['vertex_colors'].shape}")
-        print(f"    Angles shape: {sample['angles'].shape}")
         print(f"    Shoe ID: {sample['shoe_id']}")
 
         print(f"\n  Creating dataloader...")
@@ -287,7 +286,6 @@ def test_geometry_training_step():
 
         print(f"  Running training step...")
         images = {k: v.to(config.device) for k, v in batch['images'].items()}
-        angles = batch['angles'].to(config.device)
         gt_vertices = batch['vertices'][0].to(config.device)
 
         # Sample GT vertices

@@ -13,7 +13,7 @@ class Config:
     # Data Paths
     # ========================================================================
     # UPDATE THESE PATHS TO YOUR DATA LOCATION
-    obj_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/Completed"
+    obj_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs"
     images_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/input_images"
     
     # Output directories

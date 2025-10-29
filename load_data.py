@@ -190,14 +190,6 @@ class ShoeDataset(Dataset):
         self.shoe_ids = [self._extract_shoe_id(p) for p in self.obj_paths]
 
         self.views = ['front', 'back', 'left', 'right', 'top', 'bottom']
-        self.view_angles = {
-            'front': (0, 0),
-            'back': (180, 0),
-            'left': (90, 0),
-            'right': (270, 0),
-            'top': (0, 90),
-            'bottom': (0, -90)
-        }
 
         # Verify X-Y mappings
         if verify_mappings:
@@ -296,17 +288,11 @@ class ShoeDataset(Dataset):
             img = torch.from_numpy(np.array(img)).float() / 255.0
             img = img.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
             images[view] = img
-        
-        angles = torch.tensor(
-            [self.view_angles[v] for v in self.views],
-            dtype=torch.float32
-        )
-        
+
         return {
             # X values (input)
             'images': images,
-            'angles': angles,
-            
+
             # Y values (target)
             'vertices': y_values['vertices'],
             'faces': y_values['faces'],
@@ -329,23 +315,19 @@ def custom_collate_fn(batch):
     images_batch = {}
     for view in ['front', 'back', 'left', 'right', 'top', 'bottom']:
         images_batch[view] = torch.stack([item['images'][view] for item in batch])
-    
-    # Batch angles (same size)
-    angles_batch = torch.stack([item['angles'] for item in batch])
-    
+
     # Meshes as lists (variable sizes)
     vertices_batch = [item['vertices'] for item in batch]
     faces_batch = [item['faces'] for item in batch]
     colors_batch = [item['vertex_colors'] for item in batch]
     normals_batch = [item['vertex_normals'] for item in batch]
-    
+
     # Metadata
     shoe_ids = [item['shoe_id'] for item in batch]
     obj_paths = [item['obj_path'] for item in batch]
-    
+
     return {
         'images': images_batch,
-        'angles': angles_batch,
         'vertices': vertices_batch,
         'faces': faces_batch,
         'vertex_colors': colors_batch,
