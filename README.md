@@ -1,5 +1,7 @@
 # MIto3D: Multi-View Image to 3D Mesh Generation
 
+![MIto3D Cover](assets/cover_image.png)
+
 A PyTorch-based pipeline for generating textured 3D meshes from multi-view images. This system uses a two-stage approach: geometry reconstruction followed by texture prediction.
 
 ## Overview
