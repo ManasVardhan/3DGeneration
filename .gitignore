@@ -127,3 +127,15 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Project-specific artifacts
+data/*
+!data/input_images/
+!data/input_images/**
+misc/
+data/Completed/
+*.env
+.env.*
+/*.png
+
+.DS_Store
