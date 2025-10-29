@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 from datetime import datetime
 import json
+import random
 
 # Import project modules
 from config import config
@@ -41,7 +42,8 @@ class GeometryTrainer:
         self.dataset = ShoeDataset(
             obj_dir=config.obj_dir,
             images_dir=config.images_dir,
-            verify_mappings=True
+            verify_mappings=True,
+            image_size=config.image_size
         )
         
         self.dataloader = DataLoader(
@@ -95,6 +97,33 @@ class GeometryTrainer:
             # If not enough vertices, repeat some
             indices = torch.randint(0, num_verts, (num_samples,))
             return vertices[indices]
+
+    def _shuffle_views(self, images_dict):
+        """
+        Randomly shuffle the order of views to enforce permutation invariance.
+        This ensures the model learns view-content patterns, not position patterns.
+
+        Args:
+            images_dict: Dict with keys ['front', 'back', 'left', 'right', 'top', 'bottom']
+
+        Returns:
+            shuffled_images_dict: Dict with same keys but shuffled content
+        """
+        view_names = ['front', 'back', 'left', 'right', 'top', 'bottom']
+
+        # Create random permutation
+        perm = list(range(6))
+        random.shuffle(perm)
+
+        # Shuffle images
+        shuffled_images = {}
+        stacked_images = torch.stack([images_dict[name] for name in view_names], dim=1)  # (B, 6, C, H, W)
+        shuffled_stacked = stacked_images[:, perm, :, :, :]
+
+        for i, name in enumerate(view_names):
+            shuffled_images[name] = shuffled_stacked[:, i, :, :, :]
+
+        return shuffled_images
     
     def train_epoch(self, epoch):
         """Train for one epoch"""
@@ -105,19 +134,20 @@ class GeometryTrainer:
         for batch_idx, batch in enumerate(self.dataloader):
             # Move to device
             images = {k: v.to(self.config.device) for k, v in batch['images'].items()}
-            angles = batch['angles'].to(self.config.device)
-            
+
+            # Randomly shuffle views to enforce permutation invariance
+            images = self._shuffle_views(images)
+
             # Process each shoe in batch (Y values are lists)
             batch_loss = 0
             for i in range(len(batch['vertices'])):
                 gt_vertices = batch['vertices'][i].to(self.config.device)
                 gt_faces = batch['faces'][i].to(self.config.device)
-                
+
                 # Forward pass (single shoe)
                 images_single = {k: v[i:i+1] for k, v in images.items()}
-                angles_single = angles[i:i+1]
-                
-                pred_points = self.model(images_single, angles_single)
+
+                pred_points = self.model(images_single)
                 
                 # Sample GT vertices to match prediction size
                 gt_vertices_sample = self._sample_points(gt_vertices, self.config.num_points)

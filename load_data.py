@@ -178,16 +178,17 @@ class OBJToTrainingTarget:
 class ShoeDataset(Dataset):
     """Complete dataset with X (multi-view images) and Y (3D mesh)"""
     
-    def __init__(self, obj_dir, images_dir, verify_mappings=True):
+    def __init__(self, obj_dir, images_dir, verify_mappings=True, image_size=512):
         self.obj_converter = OBJToTrainingTarget(normalize=True)
         self.images_dir = Path(images_dir)
-        
+        self.image_size = image_size  # Target image size (512x512 for DINOv2)
+
         # Find all OBJs
         self.obj_paths = list(Path(obj_dir).rglob("*.obj"))
-        
+
         # Extract shoe IDs
         self.shoe_ids = [self._extract_shoe_id(p) for p in self.obj_paths]
-        
+
         self.views = ['front', 'back', 'left', 'right', 'top', 'bottom']
         self.view_angles = {
             'front': (0, 0),
@@ -197,7 +198,7 @@ class ShoeDataset(Dataset):
             'top': (0, 90),
             'bottom': (0, -90)
         }
-        
+
         # Verify X-Y mappings
         if verify_mappings:
             self._verify_all_mappings()
@@ -288,6 +289,10 @@ class ShoeDataset(Dataset):
                 )
             
             img = Image.open(img_path).convert('RGB')
+
+            # Resize to target size to avoid memory issues
+            img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
+
             img = torch.from_numpy(np.array(img)).float() / 255.0
             img = img.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
             images[view] = img

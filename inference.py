@@ -31,8 +31,8 @@ class MeshGenerator:
         print("Loading models...")
         
         # Load geometry model
-        self.geometry_model = MultiViewTripoSR(
-            pretrained_model_path=config.triposr_model,
+        self.geometry_model = GeometryModel(
+            num_points=config.num_points,
             freeze_encoder=True
         ).to(self.device)
         
@@ -59,28 +59,18 @@ class MeshGenerator:
     def load_images(self, image_dir, shoe_id):
         """
         Load 6 view images for a shoe
-        
+
         Args:
             image_dir: Directory containing images
             shoe_id: Shoe ID (e.g., "17")
-        
+
         Returns:
             images_dict: Dict of tensors
-            angles: Tensor (1, 6, 2)
         """
         views = ['front', 'back', 'left', 'right', 'top', 'bottom']
-        view_angles = {
-            'front': (0, 0),
-            'back': (180, 0),
-            'left': (90, 0),
-            'right': (270, 0),
-            'top': (0, 90),
-            'bottom': (0, -90)
-        }
-        
+
         images_dict = {}
-        angles_list = []
-        
+
         for view in views:
             # Try different extensions
             img_path = None
@@ -89,32 +79,27 @@ class MeshGenerator:
                 if test_path.exists():
                     img_path = test_path
                     break
-            
+
             if img_path is None:
                 raise FileNotFoundError(
                     f"Image not found: {image_dir}/{shoe_id}_{view}.[png|jpeg|jpg]"
                 )
-            
+
             # Load and transform
             img = Image.open(img_path).convert('RGB')
             img_tensor = self.transform(img).unsqueeze(0)  # (1, 3, H, W)
             images_dict[view] = img_tensor.to(self.device)
-            
-            angles_list.append(view_angles[view])
-        
-        angles = torch.tensor(angles_list, dtype=torch.float32).unsqueeze(0).to(self.device)
-        
-        return images_dict, angles
+
+        return images_dict
     
-    def generate(self, images_dict, angles, resolution=256):
+    def generate(self, images_dict, resolution=256):
         """
         Generate 3D mesh from images
-        
+
         Args:
             images_dict: Dict of image tensors
-            angles: View angles
             resolution: Mesh resolution (higher = more detailed)
-        
+
         Returns:
             vertices: (N, 3) numpy array
             faces: (F, 3) numpy array
@@ -123,18 +108,19 @@ class MeshGenerator:
         with torch.no_grad():
             print("  Predicting geometry...")
             # Stage 1: Predict geometry
-            triplane = self.geometry_model(images_dict, angles)
-            vertices, faces = self.geometry_model.extract_mesh(triplane, resolution=resolution)
-            
+            points = self.geometry_model(images_dict)
+            vertices, faces = self.geometry_model.extract_mesh(points)
+
             print(f"  Generated mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
-            
+
             print("  Predicting colors...")
             # Stage 2: Predict colors
-            colors = self.texture_model(vertices, images_dict)
-            
+            vertices_tensor = torch.from_numpy(vertices).float().to(self.device)
+            colors = self.texture_model(vertices_tensor, images_dict)
+
             # Convert to numpy
-            vertices_np = vertices.cpu().numpy()
-            faces_np = faces.cpu().numpy()
+            vertices_np = vertices
+            faces_np = faces
             colors_np = colors.cpu().numpy()
         
         return vertices_np, faces_np, colors_np
@@ -202,15 +188,15 @@ def main():
     # Load images
     print(f"Loading images for shoe {args.shoe_id}...")
     try:
-        images_dict, angles = generator.load_images(image_dir, args.shoe_id)
+        images_dict = generator.load_images(image_dir, args.shoe_id)
         print("✓ Images loaded\n")
     except FileNotFoundError as e:
         print(f"❌ {e}")
         return
-    
+
     # Generate mesh
     print("Generating 3D mesh...")
-    vertices, faces, colors = generator.generate(images_dict, angles, resolution=args.resolution)
+    vertices, faces, colors = generator.generate(images_dict, resolution=args.resolution)
     print("✓ Generation complete\n")
     
     # Save mesh

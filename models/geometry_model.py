@@ -51,48 +51,46 @@ class MultiViewImageEncoder(nn.Module):
 
 class ViewAggregator(nn.Module):
     """
-    Aggregate features from 6 views using attention
+    Aggregate features from 6 views using symmetric pooling operations.
+    This approach is PERMUTATION INVARIANT - output is identical regardless of view order.
+
+    Uses DeepSets-style symmetric aggregation (max + mean pooling).
+    Image-only approach - no camera angles needed!
     """
-    
+
     def __init__(self, feature_dim=768):
         super().__init__()
-        
-        # View positional encoding
-        self.view_pos_encoder = nn.Sequential(
-            nn.Linear(2, 128),  # (azimuth, elevation)
+        self.feature_dim = feature_dim
+
+        # MLP to process aggregated features (max + mean concatenated)
+        self.mlp = nn.Sequential(
+            nn.Linear(feature_dim * 2, feature_dim),  # 2x because we concat max+mean
             nn.ReLU(),
-            nn.Linear(128, feature_dim)
+            nn.Dropout(0.1),
+            nn.Linear(feature_dim, feature_dim)
         )
-        
-        # Multi-head attention for aggregation
-        self.attention = nn.MultiheadAttention(
-            embed_dim=feature_dim,
-            num_heads=8,
-            batch_first=True
-        )
-        
-        # Learnable query for global features
-        self.query = nn.Parameter(torch.randn(1, 1, feature_dim))
-    
-    def forward(self, view_features, view_angles):
+
+    def forward(self, view_features):
         """
+        Permutation-invariant view aggregation.
+
         Args:
-            view_features: (B, num_views, feature_dim)
-            view_angles: (B, num_views, 2) - (azimuth, elevation) in degrees
+            view_features: (B, num_views, feature_dim) - features from each view
+
         Returns:
-            aggregated: (B, feature_dim)
+            aggregated: (B, feature_dim) - aggregated features
+
+        Note: Output is IDENTICAL for any permutation of input views
         """
-        B, num_views, _ = view_features.shape
-        
-        # Add positional encoding based on view angles
-        pos_encoding = self.view_pos_encoder(view_angles)  # (B, num_views, feature_dim)
-        view_features = view_features + pos_encoding
-        
-        # Aggregate using attention
-        query = self.query.expand(B, -1, -1)  # (B, 1, feature_dim)
-        aggregated, _ = self.attention(query, view_features, view_features)
-        
-        return aggregated.squeeze(1)  # (B, feature_dim)
+        # Symmetric aggregation operations - order doesn't matter!
+        max_pool = torch.max(view_features, dim=1)[0]    # (B, feature_dim)
+        mean_pool = torch.mean(view_features, dim=1)     # (B, feature_dim)
+
+        # Concatenate and process
+        aggregated = torch.cat([max_pool, mean_pool], dim=1)  # (B, 2*feature_dim)
+        output = self.mlp(aggregated)  # (B, feature_dim)
+
+        return output
 
 
 class PointCloudDecoder(nn.Module):
@@ -109,18 +107,18 @@ class PointCloudDecoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
             nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Dropout(0.1),
-            
+
             nn.Linear(hidden_dim, hidden_dim * 2),
             nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
             nn.Dropout(0.1),
-            
+
             nn.Linear(hidden_dim * 2, hidden_dim * 2),
             nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim * 2),
-            
+            nn.LayerNorm(hidden_dim * 2),
+
             nn.Linear(hidden_dim * 2, num_points * 3)
         )
     
@@ -191,36 +189,35 @@ class GeometryModel(nn.Module):
         print(f"  Trainable parameters: {trainable_params:,}")
         print("="*70)
     
-    def forward(self, images_dict, view_angles):
+    def forward(self, images_dict):
         """
         Forward pass: 6 images → 3D point cloud
-        
+
         Args:
             images_dict: Dict with keys ['front', 'back', 'left', 'right', 'top', 'bottom']
                          Each value is (B, 3, H, W)
-            view_angles: (B, 6, 2) - (azimuth, elevation) for each view
-        
+
         Returns:
             points: (B, num_points, 3) - 3D point cloud
         """
         B = images_dict['front'].shape[0]
-        
+
         # Encode each view
         view_features = []
         for view_name in ['front', 'back', 'left', 'right', 'top', 'bottom']:
             img = images_dict[view_name]  # (B, 3, H, W)
             feat = self.image_encoder(img)  # (B, feature_dim)
             view_features.append(feat)
-        
+
         # Stack: (B, 6, feature_dim)
         view_features = torch.stack(view_features, dim=1)
-        
-        # Aggregate views
-        aggregated = self.view_aggregator(view_features, view_angles)  # (B, feature_dim)
-        
+
+        # Aggregate views (no angles needed!)
+        aggregated = self.view_aggregator(view_features)  # (B, feature_dim)
+
         # Decode to point cloud
         points = self.point_decoder(aggregated)  # (B, num_points, 3)
-        
+
         return points
     
     def extract_mesh(self, points, method='alpha_shape'):

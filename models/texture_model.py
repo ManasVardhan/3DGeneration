@@ -38,13 +38,10 @@ class VertexColorPredictor(nn.Module):
             nn.Linear(256, 512)
         )
         
-        # Multi-view aggregation
+        # Multi-view aggregation (permutation invariant)
         if use_all_views:
-            self.view_aggregator = nn.MultiheadAttention(
-                embed_dim=self.image_feat_dim,
-                num_heads=8,
-                batch_first=True
-            )
+            # Use symmetric pooling instead of attention for permutation invariance
+            self.feature_projection = nn.Linear(self.image_feat_dim * 2, self.image_feat_dim)
         
         # Color decoder
         color_input_dim = self.image_feat_dim + 512
@@ -81,14 +78,27 @@ class VertexColorPredictor(nn.Module):
         return image_features
     
     def aggregate_multi_view_features(self, image_features):
-        """Aggregate features from 6 views"""
+        """
+        Aggregate features from 6 views using permutation-invariant symmetric pooling.
+
+        Args:
+            image_features: (B, 6, 768) - features from 6 views
+
+        Returns:
+            aggregated: (B, 768) - aggregated features (same output for any view order)
+        """
         if not self.use_all_views:
             return image_features
-        
-        query = image_features.mean(dim=1, keepdim=True)
-        aggregated, _ = self.view_aggregator(query, image_features, image_features)
-        
-        return aggregated.squeeze(1)
+
+        # Symmetric aggregation: max + mean pooling (order-independent!)
+        max_pool = torch.max(image_features, dim=1)[0]   # (B, 768)
+        mean_pool = torch.mean(image_features, dim=1)    # (B, 768)
+
+        # Concatenate and project back to original dimension
+        combined = torch.cat([max_pool, mean_pool], dim=1)  # (B, 1536)
+        aggregated = self.feature_projection(combined)      # (B, 768)
+
+        return aggregated
     
     def forward(self, vertices, images_dict):
         """Predict colors for vertices"""
