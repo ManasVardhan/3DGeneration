@@ -63,6 +63,8 @@ numpy>=1.24.0
 
 ## Data Structure
 
+**Note:** Due to large file sizes, the OBJ files are not included in this repository. You need to provide your own training data.
+
 Your data should be organized as follows:
 
 ```
@@ -88,6 +90,33 @@ data/
 - Each OBJ file should be in a subdirectory named with the shoe ID
 - Images should be named `{shoe_id}_{view}.{png|jpg|jpeg}`
 - All 6 views are required for each shoe: front, back, left, right, top, bottom
+- OBJ files are gitignored due to large file sizes
+
+### Setting Up Your Data
+
+1. Create the required directories:
+```bash
+mkdir -p data/OBJs data/input_images
+```
+
+2. Place your OBJ files in subdirectories:
+```bash
+data/OBJs/1/shoe_model.obj
+data/OBJs/2/shoe_model.obj
+...
+```
+
+3. Place your multi-view images:
+```bash
+data/input_images/1_front.png
+data/input_images/1_back.png
+...
+```
+
+4. Verify your setup:
+```bash
+python test_training_startup.py
+```
 
 ## Configuration
 

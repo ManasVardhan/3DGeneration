@@ -129,11 +129,22 @@ dmypy.json
 .pyre/
 
 # Project-specific artifacts
-data/*
+# Ignore all data except what we explicitly include
+# Note: If using Git LFS, uncomment the lines below and comment out "data/*"
 !data/input_images/
 !data/input_images/**
+!data/OBJs/
+!data/OBJs/**/*.obj
+!data/OBJs/**/*.mtl
+!data/OBJs/**/textures/
+
+# Checkpoints and outputs (generated during training)
+checkpoints/
+logs/
+output/
+
+# Misc
 misc/
-data/Completed/
 *.env
 .env.*
 /*.png
