@@ -525,17 +525,18 @@ def coverage_loss(pred_points, gt_points, threshold=0.01):
     return 1.0 - covered
 
 
-def improved_geometry_loss(pred_points, gt_points, 
-                           lambda_chamfer=1.0, 
-                           lambda_coverage=0.1,
-                           lambda_edge=0.05,
-                           lambda_normal=0.01,
-                           lambda_smooth=0.005):
+def geometry_loss(pred_points, pred_normals, gt_points, 
+                  lambda_chamfer=1.0, 
+                  lambda_normal=0.1,
+                  lambda_edge=0.05,
+                  lambda_smooth=0.02,
+                  lambda_coverage=0.1):
     """
     IMPROVED Combined geometry loss with multiple regularization terms
     
     Args:
         pred_points: (N, 3) predicted point cloud
+        pred_normals: (N, 3) predicted surface normals (can be None for old API)
         gt_points: (M, 3) ground truth vertices
         lambda_*: weights for each loss component
     
@@ -552,8 +553,14 @@ def improved_geometry_loss(pred_points, gt_points,
     # NEW: Edge length regularization
     loss_edge = edge_length_loss(pred_points, k=10)
     
-    # NEW: Normal consistency
-    loss_normal = normal_consistency_loss(pred_points, k=20)
+    # NEW: Normal consistency (uses predicted normals if available, else estimates)
+    if pred_normals is not None:
+        # Use the predicted normals for consistency loss
+        # We want neighboring points to have similar normals
+        loss_normal = normal_consistency_with_predicted_normals(pred_points, pred_normals, k=10)
+    else:
+        # Fallback: estimate normals from point cloud
+        loss_normal = normal_consistency_loss(pred_points, k=20)
     
     # NEW: Laplacian smoothness
     loss_smooth = laplacian_smoothness_loss(pred_points, k=10)
@@ -579,5 +586,34 @@ def improved_geometry_loss(pred_points, gt_points,
     return total_loss, loss_dict
 
 
-# Backward compatibility
-geometry_loss = improved_geometry_loss
+def normal_consistency_with_predicted_normals(points, normals, k=10):
+    """
+    Normal consistency loss using predicted normals
+    Ensures neighboring points have similar normal directions
+    
+    Args:
+        points: (N, 3) point cloud
+        normals: (N, 3) predicted normals (already normalized)
+        k: number of nearest neighbors
+    """
+    N = points.shape[0]
+    
+    # Compute pairwise distances
+    pred_exp = points.unsqueeze(1)
+    dist = torch.sum((pred_exp - points.unsqueeze(0)) ** 2, dim=-1)
+    
+    # Find k nearest neighbors for each point
+    _, indices = torch.topk(dist, k=k+1, largest=False, dim=1)
+    indices = indices[:, 1:]  # Exclude self
+    
+    # Get normals of neighbors
+    neighbor_normals = normals[indices]  # (N, k, 3)
+    
+    # Compute consistency (dot product should be close to 1)
+    normals_exp = normals.unsqueeze(1).expand(-1, k, -1)
+    consistency = torch.sum(normals_exp * neighbor_normals, dim=-1)  # (N, k)
+    
+    # Loss: want high consistency (minimize 1 - consistency)
+    loss = torch.mean(1.0 - consistency)
+    
+    return loss
