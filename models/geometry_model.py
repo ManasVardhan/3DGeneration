@@ -1,11 +1,12 @@
 """
-Stage 1: Geometry Model (TripoSR-Free Version)
+Stage 1: Geometry Model (IMPROVED VERSION)
 Multi-View to 3D Point Cloud/Mesh Prediction
 
-Uses only standard packages:
-- PyTorch
-- Transformers (DINOv2)
-- Trimesh
+KEY IMPROVEMENTS:
+1. Better mesh extraction (Poisson reconstruction, not convex hull)
+2. Advanced loss functions (edge length, normal consistency, Laplacian)
+3. Higher point count support
+4. Better point cloud decoder
 """
 
 import torch
@@ -40,12 +41,8 @@ class MultiViewImageEncoder(nn.Module):
         Returns:
             features: (B, feature_dim) image features
         """
-        # DINOv2 forward pass
         outputs = self.encoder(pixel_values=images)
-        
-        # Get CLS token (global image representation)
         features = outputs.last_hidden_state[:, 0]  # (B, 768)
-        
         return features
 
 
@@ -53,9 +50,6 @@ class ViewAggregator(nn.Module):
     """
     Aggregate features from 6 views using symmetric pooling operations.
     This approach is PERMUTATION INVARIANT - output is identical regardless of view order.
-
-    Uses DeepSets-style symmetric aggregation (max + mean pooling).
-    Image-only approach - no camera angles needed!
     """
 
     def __init__(self, feature_dim=768):
@@ -64,7 +58,7 @@ class ViewAggregator(nn.Module):
 
         # MLP to process aggregated features (max + mean concatenated)
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim * 2, feature_dim),  # 2x because we concat max+mean
+            nn.Linear(feature_dim * 2, feature_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(feature_dim, feature_dim)
@@ -79,10 +73,8 @@ class ViewAggregator(nn.Module):
 
         Returns:
             aggregated: (B, feature_dim) - aggregated features
-
-        Note: Output is IDENTICAL for any permutation of input views
         """
-        # Symmetric aggregation operations - order doesn't matter!
+        # Symmetric aggregation operations
         max_pool = torch.max(view_features, dim=1)[0]    # (B, feature_dim)
         mean_pool = torch.mean(view_features, dim=1)     # (B, feature_dim)
 
@@ -93,34 +85,67 @@ class ViewAggregator(nn.Module):
         return output
 
 
-class PointCloudDecoder(nn.Module):
+class ImprovedPointCloudDecoder(nn.Module):
     """
-    Decode aggregated features into 3D point cloud
+    IMPROVED Point Cloud Decoder with:
+    - Deeper network for better detail
+    - Residual connections
+    - Better normalization
     """
     
-    def __init__(self, feature_dim=768, num_points=4096, hidden_dim=1024):
+    def __init__(self, feature_dim=768, num_points=8192, hidden_dim=1024):
         super().__init__()
         
         self.num_points = num_points
         
-        # MLP decoder
-        self.decoder = nn.Sequential(
+        # Initial projection
+        self.proj = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(),
             nn.LayerNorm(hidden_dim),
-            nn.Dropout(0.1),
-
-            nn.Linear(hidden_dim, hidden_dim * 2),
             nn.ReLU(),
-            nn.LayerNorm(hidden_dim * 2),
-            nn.Dropout(0.1),
-
+            nn.Dropout(0.1)
+        )
+        
+        # Residual blocks for better gradient flow
+        self.res_block1 = self._make_res_block(hidden_dim, hidden_dim * 2)
+        self.res_block2 = self._make_res_block(hidden_dim * 2, hidden_dim * 2)
+        self.res_block3 = self._make_res_block(hidden_dim * 2, hidden_dim * 2)
+        
+        # Final decoder to points
+        self.decoder = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim * 2),
             nn.ReLU(),
             nn.LayerNorm(hidden_dim * 2),
-
-            nn.Linear(hidden_dim * 2, num_points * 3)
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_points * 3)
         )
+    
+    def _make_res_block(self, in_dim, out_dim):
+        """Create a residual block"""
+        if in_dim != out_dim:
+            skip = nn.Linear(in_dim, out_dim)
+        else:
+            skip = nn.Identity()
+        
+        return nn.ModuleDict({
+            'skip': skip,
+            'block': nn.Sequential(
+                nn.Linear(in_dim, out_dim),
+                nn.LayerNorm(out_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(out_dim, out_dim),
+                nn.LayerNorm(out_dim)
+            )
+        })
+    
+    def _apply_res_block(self, x, res_block):
+        """Apply residual block"""
+        skip = res_block['skip'](x)
+        out = res_block['block'](x)
+        return torch.relu(skip + out)
     
     def forward(self, features):
         """
@@ -131,8 +156,14 @@ class PointCloudDecoder(nn.Module):
         """
         B = features.shape[0]
         
+        # Project and process through residual blocks
+        x = self.proj(features)
+        x = self._apply_res_block(x, self.res_block1)
+        x = self._apply_res_block(x, self.res_block2)
+        x = self._apply_res_block(x, self.res_block3)
+        
         # Decode to flat point coordinates
-        points_flat = self.decoder(features)  # (B, num_points * 3)
+        points_flat = self.decoder(x)  # (B, num_points * 3)
         
         # Reshape to point cloud
         points = points_flat.view(B, self.num_points, 3)
@@ -145,20 +176,20 @@ class PointCloudDecoder(nn.Module):
 
 class GeometryModel(nn.Module):
     """
-    Complete Geometry Model: 6 Images → 3D Point Cloud
+    IMPROVED Geometry Model: 6 Images → 3D Point Cloud
     
     Architecture:
         6 Images → DINOv2 Encoder → View Aggregation → Point Cloud Decoder
     """
     
     def __init__(self, 
-                 num_points=4096,
+                 num_points=8192,  # Increased default
                  freeze_encoder=False,
                  hidden_dim=1024):
         super().__init__()
         
         print("="*70)
-        print("INITIALIZING GEOMETRY MODEL")
+        print("INITIALIZING IMPROVED GEOMETRY MODEL")
         print("="*70)
         
         # Image encoder (DINOv2)
@@ -171,8 +202,8 @@ class GeometryModel(nn.Module):
         # View aggregator
         self.view_aggregator = ViewAggregator(feature_dim=feature_dim)
         
-        # Point cloud decoder
-        self.point_decoder = PointCloudDecoder(
+        # IMPROVED Point cloud decoder
+        self.point_decoder = ImprovedPointCloudDecoder(
             feature_dim=feature_dim,
             num_points=num_points,
             hidden_dim=hidden_dim
@@ -212,7 +243,7 @@ class GeometryModel(nn.Module):
         # Stack: (B, 6, feature_dim)
         view_features = torch.stack(view_features, dim=1)
 
-        # Aggregate views (no angles needed!)
+        # Aggregate views
         aggregated = self.view_aggregator(view_features)  # (B, feature_dim)
 
         # Decode to point cloud
@@ -220,13 +251,13 @@ class GeometryModel(nn.Module):
 
         return points
     
-    def extract_mesh(self, points, method='alpha_shape'):
+    def extract_mesh(self, points, method='poisson'):
         """
-        Convert point cloud to mesh using surface reconstruction
+        IMPROVED: Convert point cloud to mesh using proper surface reconstruction
         
         Args:
             points: (N, 3) numpy array or (B, N, 3) tensor
-            method: 'alpha_shape', 'poisson', or 'ball_pivot'
+            method: 'poisson' (recommended), 'ball_pivot', or 'alpha_shape'
         
         Returns:
             vertices: (M, 3) numpy array
@@ -240,42 +271,103 @@ class GeometryModel(nn.Module):
                 points = points[0]  # Take first batch
             points = points.detach().cpu().numpy()
         
-        # Create point cloud
-        cloud = trimesh.PointCloud(points)
-        
         try:
-            if method == 'alpha_shape':
-                # Alpha shape (fast, works well for dense clouds)
-                mesh = cloud.convex_hull
-                
-            elif method == 'poisson':
-                # Poisson reconstruction (requires Open3D)
+            if method == 'poisson':
+                # PROPER Poisson reconstruction (requires Open3D)
                 try:
                     import open3d as o3d
+                    
+                    # Create point cloud
                     pcd = o3d.geometry.PointCloud()
                     pcd.points = o3d.utility.Vector3dVector(points)
-                    pcd.estimate_normals()
-                    mesh_o3d, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+                    
+                    # Estimate normals (CRITICAL for good reconstruction)
+                    pcd.estimate_normals(
+                        search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                            radius=0.1, max_nn=30
+                        )
+                    )
+                    
+                    # Orient normals consistently
+                    pcd.orient_normals_consistent_tangent_plane(30)
+                    
+                    # Poisson reconstruction with higher depth for more detail
+                    mesh_o3d, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        pcd, depth=10, width=0, scale=1.1, linear_fit=False
+                    )
+                    
+                    # Remove low density vertices (noise)
+                    vertices_to_remove = densities < np.quantile(densities, 0.1)
+                    mesh_o3d.remove_vertices_by_mask(vertices_to_remove)
+                    
+                    # Clean up mesh
+                    mesh_o3d.remove_degenerate_triangles()
+                    mesh_o3d.remove_duplicated_triangles()
+                    mesh_o3d.remove_duplicated_vertices()
+                    mesh_o3d.remove_non_manifold_edges()
                     
                     vertices = np.asarray(mesh_o3d.vertices)
                     faces = np.asarray(mesh_o3d.triangles)
-                    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                    
+                    print(f"  ✓ Poisson reconstruction: {len(vertices)} vertices, {len(faces)} faces")
+                    
+                    return vertices, faces
+                    
                 except ImportError:
-                    print("  Warning: Open3D not available, using convex hull")
+                    print("  ⚠️ Open3D not available, install with: pip install open3d")
+                    print("  Falling back to alpha shape...")
+                    method = 'alpha_shape'
+            
+            if method == 'ball_pivot':
+                # Ball pivoting algorithm
+                try:
+                    import open3d as o3d
+                    
+                    pcd = o3d.geometry.PointCloud()
+                    pcd.points = o3d.utility.Vector3dVector(points)
+                    pcd.estimate_normals()
+                    
+                    # Compute average distance between points
+                    distances = pcd.compute_nearest_neighbor_distance()
+                    avg_dist = np.mean(distances)
+                    radius = 1.5 * avg_dist
+                    
+                    # Ball pivoting
+                    radii = [radius, radius * 2, radius * 4]
+                    mesh_o3d = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                        pcd, o3d.utility.DoubleVector(radii)
+                    )
+                    
+                    vertices = np.asarray(mesh_o3d.vertices)
+                    faces = np.asarray(mesh_o3d.triangles)
+                    
+                    print(f"  ✓ Ball pivoting: {len(vertices)} vertices, {len(faces)} faces")
+                    
+                    return vertices, faces
+                    
+                except ImportError:
+                    print("  ⚠️ Open3D not available")
+                    method = 'alpha_shape'
+            
+            if method == 'alpha_shape':
+                # Alpha shape (better than convex hull, but still limited)
+                cloud = trimesh.PointCloud(points)
+                
+                try:
+                    # Try to create alpha shape
+                    mesh = trimesh.creation.alpha_shape(cloud, alpha=0.1)
+                    print(f"  ✓ Alpha shape: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+                except:
+                    print("  ⚠️ Alpha shape failed, using convex hull as last resort")
                     mesh = cloud.convex_hull
-            
-            else:
-                # Default to convex hull
-                mesh = cloud.convex_hull
-            
-            vertices = mesh.vertices
-            faces = mesh.faces
-            
-            return vertices, faces
+                
+                vertices = mesh.vertices
+                faces = mesh.faces
+                
+                return vertices, faces
             
         except Exception as e:
-            print(f"  Warning: Mesh extraction failed ({e}), returning point cloud")
-            # Return points as "mesh" with no faces
+            print(f"  ⚠️ Mesh extraction failed ({e}), returning point cloud")
             return points, np.array([])
     
     def get_trainable_parameters(self):
@@ -290,19 +382,12 @@ class GeometryModel(nn.Module):
 
 
 # ============================================================================
-# Loss Functions
+# IMPROVED Loss Functions
 # ============================================================================
 
 def chamfer_distance_simple(pred_points, gt_points):
     """
     Simplified Chamfer Distance (no external dependencies)
-    
-    Args:
-        pred_points: (N, 3) predicted points
-        gt_points: (M, 3) ground truth points
-    
-    Returns:
-        loss: scalar
     """
     # Expand for broadcasting
     pred_exp = pred_points.unsqueeze(1)  # (N, 1, 3)
@@ -322,30 +407,106 @@ def chamfer_distance_simple(pred_points, gt_points):
     return forward_loss + backward_loss
 
 
-def chamfer_distance_pytorch3d(pred_points, gt_points):
+def edge_length_loss(points, k=10):
     """
-    Chamfer distance using PyTorch3D (if available)
-    Falls back to simple version if not installed
+    NEW: Regularize edge lengths between nearest neighbors
+    Prevents points from collapsing or spreading too much
+    
+    Args:
+        points: (N, 3) point cloud
+        k: number of nearest neighbors to consider
     """
-    try:
-        from pytorch3d.loss import chamfer_distance
-        loss, _ = chamfer_distance(
-            pred_points.unsqueeze(0),
-            gt_points.unsqueeze(0)
-        )
-        return loss
-    except ImportError:
-        return chamfer_distance_simple(pred_points, gt_points)
+    # Compute pairwise distances
+    dist_matrix = torch.cdist(points, points)  # (N, N)
+    
+    # Get k nearest neighbors for each point
+    knn_dist, _ = torch.topk(dist_matrix, k=k+1, dim=1, largest=False)  # (N, k+1)
+    knn_dist = knn_dist[:, 1:]  # Exclude self (distance 0)
+    
+    # Target edge length (adjust based on your scale)
+    target_length = 0.05
+    
+    # Penalize deviation from target length
+    loss = torch.mean((knn_dist - target_length) ** 2)
+    
+    return loss
 
 
-def earth_mover_distance(pred_points, gt_points):
+def normal_consistency_loss(points, k=20):
     """
-    Approximation of Earth Mover's Distance
-    More expensive but better quality than Chamfer
+    NEW: Encourage consistent surface normals
+    Helps create smooth surfaces with proper orientation
+    
+    Args:
+        points: (N, 3) point cloud
+        k: number of neighbors for normal estimation
     """
-    # Simplified EMD using Hungarian algorithm approximation
-    # This is just Chamfer for now, can be improved
-    return chamfer_distance_simple(pred_points, gt_points)
+    # Compute pairwise distances
+    dist_matrix = torch.cdist(points, points)  # (N, N)
+    
+    # Get k nearest neighbors
+    _, knn_idx = torch.topk(dist_matrix, k=k, dim=1, largest=False)  # (N, k)
+    
+    # For each point, estimate normal from neighbors
+    normals = []
+    for i in range(points.shape[0]):
+        neighbors = points[knn_idx[i]]  # (k, 3)
+        
+        # Center the neighbors
+        centered = neighbors - neighbors.mean(dim=0, keepdim=True)
+        
+        # Compute covariance matrix
+        cov = torch.matmul(centered.T, centered) / k
+        
+        # Get smallest eigenvector (normal direction)
+        try:
+            _, _, v = torch.svd(cov)
+            normal = v[:, -1]  # Smallest eigenvector
+            normals.append(normal)
+        except:
+            # Fallback if SVD fails
+            normals.append(torch.tensor([0.0, 1.0, 0.0], device=points.device))
+    
+    normals = torch.stack(normals)  # (N, 3)
+    
+    # Normalize
+    normals = normals / (torch.norm(normals, dim=1, keepdim=True) + 1e-8)
+    
+    # Consistency loss: normals of neighbors should be similar
+    normal_diff = 0.0
+    for i in range(points.shape[0]):
+        neighbor_normals = normals[knn_idx[i]]  # (k, 3)
+        # Cosine similarity (want high similarity = low loss)
+        similarity = torch.matmul(neighbor_normals, normals[i])  # (k,)
+        normal_diff += torch.mean(1.0 - torch.abs(similarity))
+    
+    return normal_diff / points.shape[0]
+
+
+def laplacian_smoothness_loss(points, k=10):
+    """
+    NEW: Laplacian smoothness regularization
+    Encourages smooth surfaces by penalizing high curvature
+    
+    Args:
+        points: (N, 3) point cloud
+        k: number of neighbors
+    """
+    # Compute pairwise distances
+    dist_matrix = torch.cdist(points, points)  # (N, N)
+    
+    # Get k nearest neighbors
+    _, knn_idx = torch.topk(dist_matrix, k=k+1, dim=1, largest=False)  # (N, k+1)
+    knn_idx = knn_idx[:, 1:]  # Exclude self
+    
+    # Laplacian: each point should be close to average of neighbors
+    laplacian_loss = 0.0
+    for i in range(points.shape[0]):
+        neighbors = points[knn_idx[i]]  # (k, 3)
+        neighbor_mean = neighbors.mean(dim=0)
+        laplacian_loss += torch.sum((points[i] - neighbor_mean) ** 2)
+    
+    return laplacian_loss / points.shape[0]
 
 
 def coverage_loss(pred_points, gt_points, threshold=0.01):
@@ -358,40 +519,65 @@ def coverage_loss(pred_points, gt_points, threshold=0.01):
     dist = torch.sum((pred_exp - gt_exp) ** 2, dim=-1)  # (N, M)
     min_dist_to_pred = torch.min(dist, dim=0)[0]  # (M,)
     
-    # Percentage of GT points covered (within threshold)
+    # Percentage of GT points covered
     covered = (min_dist_to_pred < threshold).float().mean()
     
-    # Loss: want high coverage (minimize 1 - covered)
     return 1.0 - covered
 
 
-def geometry_loss(pred_points, gt_points, lambda_chamfer=1.0, lambda_coverage=0.1):
+def improved_geometry_loss(pred_points, gt_points, 
+                           lambda_chamfer=1.0, 
+                           lambda_coverage=0.1,
+                           lambda_edge=0.05,
+                           lambda_normal=0.01,
+                           lambda_smooth=0.005):
     """
-    Combined geometry loss
+    IMPROVED Combined geometry loss with multiple regularization terms
     
     Args:
         pred_points: (N, 3) predicted point cloud
         gt_points: (M, 3) ground truth vertices
-        lambda_chamfer: Weight for Chamfer distance
-        lambda_coverage: Weight for coverage loss
+        lambda_*: weights for each loss component
     
     Returns:
         total_loss: Weighted sum
         loss_dict: Individual losses
     """
     # Main Chamfer distance
-    loss_chamfer = chamfer_distance_pytorch3d(pred_points, gt_points)
+    loss_chamfer = chamfer_distance_simple(pred_points, gt_points)
     
-    # Coverage loss (ensure we cover the GT surface)
+    # Coverage loss
     loss_cover = coverage_loss(pred_points, gt_points)
     
+    # NEW: Edge length regularization
+    loss_edge = edge_length_loss(pred_points, k=10)
+    
+    # NEW: Normal consistency
+    loss_normal = normal_consistency_loss(pred_points, k=20)
+    
+    # NEW: Laplacian smoothness
+    loss_smooth = laplacian_smoothness_loss(pred_points, k=10)
+    
     # Total loss
-    total_loss = lambda_chamfer * loss_chamfer + lambda_coverage * loss_cover
+    total_loss = (
+        lambda_chamfer * loss_chamfer +
+        lambda_coverage * loss_cover +
+        lambda_edge * loss_edge +
+        lambda_normal * loss_normal +
+        lambda_smooth * loss_smooth
+    )
     
     loss_dict = {
         'chamfer': loss_chamfer.item(),
         'coverage': loss_cover.item(),
+        'edge': loss_edge.item(),
+        'normal': loss_normal.item(),
+        'smooth': loss_smooth.item(),
         'total': total_loss.item()
     }
     
     return total_loss, loss_dict
+
+
+# Backward compatibility
+geometry_loss = improved_geometry_loss

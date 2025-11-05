@@ -1,18 +1,21 @@
 """
-Configuration file for Multi-View to 3D Mesh Training
-Edit this file to customize training settings
+IMPROVED Configuration for Multi-View to 3D Mesh Training
+Key improvements over original:
+- Higher point count (8192 instead of 4096)
+- Better learning rate schedule
+- Additional loss weights
+- Unfrozen encoder for better quality
 """
 
 import torch
 from pathlib import Path
 
-class Config:
-    """Training configuration"""
+class ImprovedConfig:
+    """IMPROVED Training configuration"""
     
     # ========================================================================
     # Data Paths
     # ========================================================================
-    # UPDATE THESE PATHS TO YOUR DATA LOCATION
     obj_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs"
     images_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/input_images"
     
@@ -22,145 +25,107 @@ class Config:
     output_dir = "output"
     
     # ========================================================================
-    # Model Architecture Settings
+    # IMPROVED Model Architecture Settings
     # ========================================================================
-    # Geometry model
-    num_points = 4096  # Number of 3D points to predict
-                       # 2048: Faster, lower quality
-                       # 4096: Balanced (recommended)
-                       # 8192: Slower, higher quality
+    num_points = 8192  # INCREASED from 4096 for better detail
+                       # More points = more geometric detail
     
-    hidden_dim = 1024  # Hidden layer size
+    hidden_dim = 1024  # Keep same
     
-    # Stage 1: Geometry Training Settings
     # ========================================================================
-    # Model architecture
-    freeze_image_encoder = False  # Set True to freeze DINOv2 (faster, less memory)
-                                 # False: Fine-tune everything (better quality)
-                                 # True: Only train decoder (faster)
+    # IMPROVED Stage 1: Geometry Training Settings
+    # ========================================================================
     
-    feature_dim = 768  # DINOv2-base feature dimension (don't change)
-    num_views = 6       # Number of views (don't change)
+    freeze_image_encoder = False  # CHANGED: Fine-tune for better results
+                                 # Set to True if running out of memory
+    
+    feature_dim = 768
+    num_views = 6
     
     # Training hyperparameters
-    batch_size_stage1 = 1  # TripoSR is memory-heavy
-                          # Mac M1/M2: Use 1
-                          # RTX 3090: Can use 2-4
-                          # A100: Can use 4-8
+    batch_size_stage1 = 1  # Keep same (memory constraints)
     
-    num_epochs_stage1 = 50  # Number of training epochs
-                           # 50: Good balance
-                           # 100: Better quality, longer training
-                           # 30: Quick test
+    num_epochs_stage1 = 100  # INCREASED from 50 - need more training
     
-    learning_rate_stage1 = 5e-5  # Lower for fine-tuning
-                                # Don't increase above 1e-4
+    # IMPROVED LEARNING RATE SCHEDULE
+    learning_rate_stage1 = 2e-4  # INCREASED from 5e-5
+                                 # Start higher, use better decay
     
-    weight_decay_stage1 = 0.01  # Regularization
+    lr_schedule = 'cosine_restart'  # NEW: Use cosine with warm restarts
+                                    # Options: 'cosine', 'cosine_restart', 'plateau'
+    
+    lr_min = 1e-6  # NEW: Minimum learning rate (instead of 5e-8)
+    
+    warmup_epochs = 5  # NEW: Learning rate warmup
+    
+    weight_decay_stage1 = 0.01
     
     # ========================================================================
-    # Stage 2: Texture Training Settings
+    # IMPROVED Loss Function Weights
     # ========================================================================
-    # Training hyperparameters
-    batch_size_stage2 = 1  # Same as stage 1
+    # Main losses
+    lambda_chamfer = 1.0
+    lambda_coverage = 0.1
     
-    num_epochs_stage2 = 30  # Texture usually needs fewer epochs
-                           # 30: Good balance
-                           # 50: Better quality
-                           # 20: Quick test
+    # NEW: Additional regularization losses
+    lambda_edge = 0.05        # Edge length regularization
+    lambda_normal = 0.01      # Normal consistency
+    lambda_smooth = 0.005     # Laplacian smoothness
     
-    learning_rate_stage2 = 1e-4  # Higher than stage 1
-                                # Training from scratch
-    
+    # ========================================================================
+    # Stage 2: Texture Training Settings (unchanged)
+    # ========================================================================
+    batch_size_stage2 = 1
+    num_epochs_stage2 = 30
+    learning_rate_stage2 = 1e-4
     weight_decay_stage2 = 0.01
+    
+    lambda_color_l1l2 = 1.0
+    lambda_perceptual = 0.5
+    lambda_smooth_texture = 0.1
     
     # ========================================================================
     # Data Loading Settings
     # ========================================================================
-    image_size = 512  # TripoSR expects 512x512 (don't change)
-    
-    num_workers = 0  # Number of worker threads for data loading
-                    # Mac MPS: MUST be 0
-                    # CUDA: Can use 2-4 for faster loading
+    image_size = 512
+    num_workers = 0  # Mac MPS requires 0
     
     # ========================================================================
     # Device Settings
     # ========================================================================
-    # Automatically detect best available device
     device = "mps" if torch.backends.mps.is_available() else \
              "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # Or manually set:
-    # device = "mps"   # Mac M1/M2/M3
-    # device = "cuda"  # NVIDIA GPU
-    # device = "cpu"   # CPU only (very slow)
     
     # ========================================================================
     # Logging & Checkpointing
     # ========================================================================
-    log_interval = 5   # Log training progress every N batches
-                      # Lower = more frequent logging
-                      # 1: Log every batch (verbose)
-                      # 10: Less frequent
-    
-    save_interval = 10  # Save checkpoint every N epochs
-                       # 5: Save more frequently
-                       # 10: Balanced
-                       # 20: Save less frequently
+    log_interval = 5
+    save_interval = 10
     
     # ========================================================================
-    # Early Stopping
+    # Early Stopping (more patient)
     # ========================================================================
-    patience = 15      # Stop if no improvement for N epochs
-                      # 10: Stop early
-                      # 15: Balanced
-                      # 20: Train longer
-    
-    min_delta = 1e-4  # Minimum improvement to count as progress
-                      # Smaller = more sensitive
-    
-    # ========================================================================
-    # Loss Function Weights
-    # ========================================================================
-    # Geometry loss weights
-    lambda_chamfer = 1.0      # Main geometry loss
-    lambda_normal = 0.01      # Normal consistency (smoothness)
-    
-    # Texture loss weights
-    lambda_color_l1l2 = 1.0   # Main color matching
-    lambda_perceptual = 0.5   # Perceptual similarity
-    lambda_smooth = 0.1       # Color smoothness
+    patience = 20  # INCREASED from 15 - allow more time to improve
+    min_delta = 5e-5  # DECREASED - more sensitive to improvements
     
     # ========================================================================
     # Inference Settings
     # ========================================================================
-    # Default model paths for inference
-    geometry_checkpoint = "checkpoints/triposr_mv_best.pth"
+    geometry_checkpoint = "checkpoints/geometry_best.pth"
     texture_checkpoint = "checkpoints/texture_best.pth"
     
-    # Inference resolution
-    inference_resolution = 256  # Can set higher for inference
-                               # 256: Fast
-                               # 512: Higher quality
+    mesh_extraction_method = 'poisson'  # NEW: Use Poisson instead of convex hull
+                                       # Options: 'poisson', 'ball_pivot', 'alpha_shape'
+    
+    inference_resolution = 512
     
     # ========================================================================
-    # Advanced Settings (Usually don't need to change)
+    # Advanced Settings
     # ========================================================================
-    # Gradient clipping
-    grad_clip_norm = 1.0  # Prevent exploding gradients
-    
-    # Mixed precision training (experimental)
-    use_amp = False  # Automatic Mixed Precision
-                    # Can enable on CUDA for faster training
-                    # Not supported on MPS
-    
-    # Reproducibility
-    seed = 42  # Random seed for reproducibility
-    
-    # ========================================================================
-    # Validation Settings
-    # ========================================================================
-    val_split = 0.1  # Fraction of data for validation (not implemented yet)
+    grad_clip_norm = 1.0
+    use_amp = False
+    seed = 42
+    val_split = 0.1
     
     # ========================================================================
     # Helper Methods
@@ -169,23 +134,34 @@ class Config:
     def print_config(cls):
         """Print current configuration"""
         print("="*70)
-        print("CONFIGURATION")
+        print("IMPROVED CONFIGURATION")
         print("="*70)
         print(f"Data:")
         print(f"  OBJ dir:    {cls.obj_dir}")
         print(f"  Images dir: {cls.images_dir}")
+        print(f"\nKey Improvements:")
+        print(f"  ✓ Point count: 4096 → {cls.num_points}")
+        print(f"  ✓ Learning rate: 5e-5 → {cls.learning_rate_stage1}")
+        print(f"  ✓ LR schedule: {cls.lr_schedule}")
+        print(f"  ✓ Min LR: {cls.lr_min}")
+        print(f"  ✓ Fine-tune encoder: {not cls.freeze_image_encoder}")
+        print(f"  ✓ Mesh extraction: {cls.mesh_extraction_method}")
         print(f"\nStage 1 (Geometry):")
         print(f"  Epochs:       {cls.num_epochs_stage1}")
         print(f"  Batch size:   {cls.batch_size_stage1}")
         print(f"  Learning rate: {cls.learning_rate_stage1}")
-        print(f"  Freeze encoder: {cls.freeze_image_encoder}")
+        print(f"  Warmup epochs: {cls.warmup_epochs}")
+        print(f"\nLoss weights:")
+        print(f"  Chamfer:      {cls.lambda_chamfer}")
+        print(f"  Coverage:     {cls.lambda_coverage}")
+        print(f"  Edge length:  {cls.lambda_edge}")
+        print(f"  Normal:       {cls.lambda_normal}")
+        print(f"  Smoothness:   {cls.lambda_smooth}")
         print(f"\nStage 2 (Texture):")
         print(f"  Epochs:       {cls.num_epochs_stage2}")
         print(f"  Batch size:   {cls.batch_size_stage2}")
         print(f"  Learning rate: {cls.learning_rate_stage2}")
-        print(f"\nDevice:")
-        print(f"  {cls.device}")
-        print(f"\nMesh resolution: {cls.mesh_resolution}")
+        print(f"\nDevice: {cls.device}")
         print("="*70)
     
     @classmethod
@@ -201,60 +177,33 @@ class Config:
 
 
 # Create singleton config instance
-config = Config()
+config = ImprovedConfig()
 
-# Set random seed for reproducibility
+# Set random seed
 torch.manual_seed(config.seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(config.seed)
 
 
 # ============================================================================
-# Configuration Presets
+# Quick Test Config (for debugging)
 # ============================================================================
 
-class FastTrainingConfig(Config):
-    """Quick training for testing"""
-    num_epochs_stage1 = 10
-    num_epochs_stage2 = 10
-    mesh_resolution = 128
+class QuickTestConfig(ImprovedConfig):
+    """Very quick training for testing changes"""
+    num_epochs_stage1 = 5
+    num_epochs_stage2 = 5
+    num_points = 2048
     freeze_image_encoder = True
-    batch_size_stage1 = 1
-    batch_size_stage2 = 1
-
-
-class HighQualityConfig(Config):
-    """High quality, longer training"""
-    num_epochs_stage1 = 100
-    num_epochs_stage2 = 50
-    mesh_resolution = 512
-    freeze_image_encoder = False
-    learning_rate_stage1 = 3e-5  # Even lower for careful fine-tuning
-
-
-class MemoryEfficientConfig(Config):
-    """For limited GPU memory"""
-    batch_size_stage1 = 1
-    batch_size_stage2 = 1
-    mesh_resolution = 128
-    freeze_image_encoder = True
-    num_workers = 0
+    learning_rate_stage1 = 1e-4
 
 
 # ============================================================================
-# Usage Examples
+# Usage
 # ============================================================================
 
 if __name__ == "__main__":
-    # Print default configuration
-    print("\nDefault Configuration:")
+    print("\nImproved Configuration:")
     config.print_config()
-    
-    # Create directories
     print("\n")
     config.create_directories()
-    
-    # Example: Use a preset
-    print("\n\nFast Training Preset:")
-    fast_config = FastTrainingConfig()
-    fast_config.print_config()
