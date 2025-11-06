@@ -108,7 +108,7 @@ class MeshGenerator:
         with torch.no_grad():
             print("  Predicting geometry...")
             # Stage 1: Predict geometry
-            points = self.geometry_model(images_dict)
+            points, normals = self.geometry_model(images_dict)
             vertices, faces = self.geometry_model.extract_mesh(points)
 
             print(f"  Generated mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
