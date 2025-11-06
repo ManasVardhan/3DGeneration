@@ -462,14 +462,22 @@ def edge_length_loss(points, k=10):
     """
     NEW: Regularize edge lengths between nearest neighbors
     Prevents points from collapsing or spreading too much
-    
+
     Args:
         points: (N, 3) point cloud
         k: number of nearest neighbors to consider
     """
+    N = points.shape[0]
+
+    # Bounds check: need at least k+1 points
+    if N <= k:
+        k = max(1, N - 1)
+    if k < 1:
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     dist_matrix = torch.cdist(points, points)  # (N, N)
-    
+
     # Get k nearest neighbors for each point
     knn_dist, _ = torch.topk(dist_matrix, k=k+1, dim=1, largest=False)  # (N, k+1)
     knn_dist = knn_dist[:, 1:]  # Exclude self (distance 0)
@@ -546,14 +554,22 @@ def laplacian_smoothness_loss(points, k=10):
     """
     NEW: Laplacian smoothness regularization
     Encourages smooth surfaces by penalizing high curvature
-    
+
     Args:
         points: (N, 3) point cloud
         k: number of neighbors
     """
+    N = points.shape[0]
+
+    # Bounds check: need at least k+1 points
+    if N <= k:
+        k = max(1, N - 1)
+    if k < 1:
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     dist_matrix = torch.cdist(points, points)  # (N, N)
-    
+
     # Get k nearest neighbors
     _, knn_idx = torch.topk(dist_matrix, k=k+1, dim=1, largest=False)  # (N, k+1)
     knn_idx = knn_idx[:, 1:]  # Exclude self
@@ -666,18 +682,24 @@ def normal_consistency_with_predicted_normals(points, normals, k=10):
     """
     Normal consistency loss using predicted normals
     Ensures neighboring points have similar normal directions
-    
+
     Args:
         points: (N, 3) point cloud
         normals: (N, 3) predicted normals (already normalized)
         k: number of nearest neighbors
     """
     N = points.shape[0]
-    
+
+    # Bounds check: need at least k+1 points
+    if N <= k:
+        k = max(1, N - 1)
+    if k < 1:
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     pred_exp = points.unsqueeze(1)
     dist = torch.sum((pred_exp - points.unsqueeze(0)) ** 2, dim=-1)
-    
+
     # Find k nearest neighbors for each point
     _, indices = torch.topk(dist, k=k+1, largest=False, dim=1)
     indices = indices[:, 1:]  # Exclude self
