@@ -174,55 +174,104 @@ class ImprovedPointCloudDecoder(nn.Module):
         return points
 
 
+class NormalDecoder(nn.Module):
+    """
+    Decoder for predicting surface normals
+    """
+
+    def __init__(self, feature_dim=768, num_points=8192, hidden_dim=1024):
+        super().__init__()
+
+        self.num_points = num_points
+
+        # Simple MLP to predict normals
+        self.decoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_points * 3)
+        )
+
+    def forward(self, features):
+        """
+        Args:
+            features: (B, feature_dim)
+        Returns:
+            normals: (B, num_points, 3) - normalized surface normals
+        """
+        B = features.shape[0]
+
+        # Decode to flat normal coordinates
+        normals_flat = self.decoder(features)  # (B, num_points * 3)
+
+        # Reshape to normals
+        normals = normals_flat.view(B, self.num_points, 3)
+
+        # Normalize to unit length
+        normals = normals / (torch.norm(normals, dim=-1, keepdim=True) + 1e-8)
+
+        return normals
+
+
 class GeometryModel(nn.Module):
     """
-    IMPROVED Geometry Model: 6 Images → 3D Point Cloud
-    
+    IMPROVED Geometry Model: 6 Images → 3D Point Cloud + Normals
+
     Architecture:
-        6 Images → DINOv2 Encoder → View Aggregation → Point Cloud Decoder
+        6 Images → DINOv2 Encoder → View Aggregation → Point Cloud Decoder + Normal Decoder
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  num_points=8192,  # Increased default
                  freeze_encoder=False,
                  hidden_dim=1024):
         super().__init__()
-        
+
         print("="*70)
         print("INITIALIZING IMPROVED GEOMETRY MODEL")
         print("="*70)
-        
+
         # Image encoder (DINOv2)
         self.image_encoder = MultiViewImageEncoder(
             model_name='facebook/dinov2-base',
             freeze=freeze_encoder
         )
         feature_dim = self.image_encoder.feature_dim
-        
+
         # View aggregator
         self.view_aggregator = ViewAggregator(feature_dim=feature_dim)
-        
+
         # IMPROVED Point cloud decoder
         self.point_decoder = ImprovedPointCloudDecoder(
             feature_dim=feature_dim,
             num_points=num_points,
             hidden_dim=hidden_dim
         )
-        
+
+        # Normal decoder
+        self.normal_decoder = NormalDecoder(
+            feature_dim=feature_dim,
+            num_points=num_points,
+            hidden_dim=hidden_dim
+        )
+
         self.num_points = num_points
-        
+
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        
+
         print(f"✓ Model initialized")
-        print(f"  Output: {num_points} 3D points")
+        print(f"  Output: {num_points} 3D points + normals")
         print(f"  Total parameters: {total_params:,}")
         print(f"  Trainable parameters: {trainable_params:,}")
         print("="*70)
     
     def forward(self, images_dict):
         """
-        Forward pass: 6 images → 3D point cloud
+        Forward pass: 6 images → 3D point cloud + normals
 
         Args:
             images_dict: Dict with keys ['front', 'back', 'left', 'right', 'top', 'bottom']
@@ -230,6 +279,7 @@ class GeometryModel(nn.Module):
 
         Returns:
             points: (B, num_points, 3) - 3D point cloud
+            normals: (B, num_points, 3) - surface normals
         """
         B = images_dict['front'].shape[0]
 
@@ -246,10 +296,11 @@ class GeometryModel(nn.Module):
         # Aggregate views
         aggregated = self.view_aggregator(view_features)  # (B, feature_dim)
 
-        # Decode to point cloud
+        # Decode to point cloud and normals
         points = self.point_decoder(aggregated)  # (B, num_points, 3)
+        normals = self.normal_decoder(aggregated)  # (B, num_points, 3)
 
-        return points
+        return points, normals
     
     def extract_mesh(self, points, method='poisson'):
         """
