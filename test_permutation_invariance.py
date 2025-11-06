@@ -93,7 +93,8 @@ def test_texture_model_permutation_invariance():
     np.random.seed(42)
 
     # Initialize model
-    model = VertexColorPredictor(use_all_views=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = VertexColorPredictor(use_all_views=True, device=device)
     model.eval()
 
     # Create dummy input data

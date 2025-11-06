@@ -214,14 +214,16 @@ def test_geometry_forward_pass():
 
         print(f"  Running forward pass...")
         with torch.no_grad():
-            output = model(images_dict)
+            pred_points, pred_normals = model(images_dict)
 
-        print(f"    Output shape: {output.shape}")
-        print(f"    Output range: [{output.min().item():.3f}, {output.max().item():.3f}]")
+        print(f"    Points shape: {pred_points.shape}")
+        print(f"    Normals shape: {pred_normals.shape}")
+        print(f"    Points range: [{pred_points.min().item():.3f}, {pred_points.max().item():.3f}]")
+        print(f"    Normals range: [{pred_normals.min().item():.3f}, {pred_normals.max().item():.3f}]")
 
         print(f"\n  Testing loss computation...")
         gt_points = torch.randn(1024, 3).to(config.device)
-        loss, loss_dict = geometry_loss(output[0], gt_points)
+        loss, loss_dict = geometry_loss(pred_points[0], pred_normals[0], gt_points)
         print(f"    Loss: {loss.item():.6f}")
         print(f"    Loss components: {loss_dict}")
 
@@ -300,7 +302,7 @@ def test_geometry_training_step():
         # Forward pass
         print(f"    Forward...")
         images_single = {k: v[0:1] for k, v in images.items()}
-        pred_points = model(images_single)
+        pred_points, pred_normals = model(images_single)
 
         # Loss
         print(f"    Loss computation...")
@@ -339,8 +341,9 @@ def test_texture_model_init():
         print(f"  Initializing texture model...")
         model = VertexColorPredictor(
             feature_dim=config.feature_dim,
-            use_all_views=True
-        ).to(config.device)
+            use_all_views=True,
+            device=config.device
+        )
 
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"  ✓ Model initialized")
@@ -368,8 +371,9 @@ def test_texture_forward_pass():
         print(f"  Creating model...")
         model = VertexColorPredictor(
             feature_dim=768,
-            use_all_views=True
-        ).to(config.device)
+            use_all_views=True,
+            device=config.device
+        )
         model.eval()
 
         print(f"  Creating dummy input...")

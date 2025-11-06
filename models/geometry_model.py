@@ -174,55 +174,104 @@ class ImprovedPointCloudDecoder(nn.Module):
         return points
 
 
+class NormalDecoder(nn.Module):
+    """
+    Decoder for predicting surface normals
+    """
+
+    def __init__(self, feature_dim=768, num_points=8192, hidden_dim=1024):
+        super().__init__()
+
+        self.num_points = num_points
+
+        # Simple MLP to predict normals
+        self.decoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_points * 3)
+        )
+
+    def forward(self, features):
+        """
+        Args:
+            features: (B, feature_dim)
+        Returns:
+            normals: (B, num_points, 3) - normalized surface normals
+        """
+        B = features.shape[0]
+
+        # Decode to flat normal coordinates
+        normals_flat = self.decoder(features)  # (B, num_points * 3)
+
+        # Reshape to normals
+        normals = normals_flat.view(B, self.num_points, 3)
+
+        # Normalize to unit length
+        normals = normals / (torch.norm(normals, dim=-1, keepdim=True) + 1e-8)
+
+        return normals
+
+
 class GeometryModel(nn.Module):
     """
-    IMPROVED Geometry Model: 6 Images → 3D Point Cloud
-    
+    IMPROVED Geometry Model: 6 Images → 3D Point Cloud + Normals
+
     Architecture:
-        6 Images → DINOv2 Encoder → View Aggregation → Point Cloud Decoder
+        6 Images → DINOv2 Encoder → View Aggregation → Point Cloud Decoder + Normal Decoder
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  num_points=8192,  # Increased default
                  freeze_encoder=False,
                  hidden_dim=1024):
         super().__init__()
-        
+
         print("="*70)
         print("INITIALIZING IMPROVED GEOMETRY MODEL")
         print("="*70)
-        
+
         # Image encoder (DINOv2)
         self.image_encoder = MultiViewImageEncoder(
             model_name='facebook/dinov2-base',
             freeze=freeze_encoder
         )
         feature_dim = self.image_encoder.feature_dim
-        
+
         # View aggregator
         self.view_aggregator = ViewAggregator(feature_dim=feature_dim)
-        
+
         # IMPROVED Point cloud decoder
         self.point_decoder = ImprovedPointCloudDecoder(
             feature_dim=feature_dim,
             num_points=num_points,
             hidden_dim=hidden_dim
         )
-        
+
+        # Normal decoder
+        self.normal_decoder = NormalDecoder(
+            feature_dim=feature_dim,
+            num_points=num_points,
+            hidden_dim=hidden_dim
+        )
+
         self.num_points = num_points
-        
+
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        
+
         print(f"✓ Model initialized")
-        print(f"  Output: {num_points} 3D points")
+        print(f"  Output: {num_points} 3D points + normals")
         print(f"  Total parameters: {total_params:,}")
         print(f"  Trainable parameters: {trainable_params:,}")
         print("="*70)
     
     def forward(self, images_dict):
         """
-        Forward pass: 6 images → 3D point cloud
+        Forward pass: 6 images → 3D point cloud + normals
 
         Args:
             images_dict: Dict with keys ['front', 'back', 'left', 'right', 'top', 'bottom']
@@ -230,6 +279,7 @@ class GeometryModel(nn.Module):
 
         Returns:
             points: (B, num_points, 3) - 3D point cloud
+            normals: (B, num_points, 3) - surface normals
         """
         B = images_dict['front'].shape[0]
 
@@ -246,10 +296,11 @@ class GeometryModel(nn.Module):
         # Aggregate views
         aggregated = self.view_aggregator(view_features)  # (B, feature_dim)
 
-        # Decode to point cloud
+        # Decode to point cloud and normals
         points = self.point_decoder(aggregated)  # (B, num_points, 3)
+        normals = self.normal_decoder(aggregated)  # (B, num_points, 3)
 
-        return points
+        return points, normals
     
     def extract_mesh(self, points, method='poisson'):
         """
@@ -411,14 +462,22 @@ def edge_length_loss(points, k=10):
     """
     NEW: Regularize edge lengths between nearest neighbors
     Prevents points from collapsing or spreading too much
-    
+
     Args:
         points: (N, 3) point cloud
         k: number of nearest neighbors to consider
     """
+    N = points.shape[0]
+
+    # Bounds check: need at least k+1 points
+    if N <= k:
+        k = max(1, N - 1)
+    if k < 1:
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     dist_matrix = torch.cdist(points, points)  # (N, N)
-    
+
     # Get k nearest neighbors for each point
     knn_dist, _ = torch.topk(dist_matrix, k=k+1, dim=1, largest=False)  # (N, k+1)
     knn_dist = knn_dist[:, 1:]  # Exclude self (distance 0)
@@ -436,65 +495,81 @@ def normal_consistency_loss(points, k=20):
     """
     NEW: Encourage consistent surface normals
     Helps create smooth surfaces with proper orientation
-    
+
     Args:
         points: (N, 3) point cloud
         k: number of neighbors for normal estimation
     """
+    N = points.shape[0]
+
+    # If too few points, reduce k
+    k = min(k, N - 1)
+    if k < 3:
+        # Not enough points for normal estimation
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     dist_matrix = torch.cdist(points, points)  # (N, N)
-    
+
     # Get k nearest neighbors
     _, knn_idx = torch.topk(dist_matrix, k=k, dim=1, largest=False)  # (N, k)
-    
+
     # For each point, estimate normal from neighbors
     normals = []
-    for i in range(points.shape[0]):
+    for i in range(N):
         neighbors = points[knn_idx[i]]  # (k, 3)
-        
+
         # Center the neighbors
-        centered = neighbors - neighbors.mean(dim=0, keepdim=True)
-        
-        # Compute covariance matrix
-        cov = torch.matmul(centered.T, centered) / k
-        
+        centered = neighbors - neighbors.mean(dim=0, keepdim=True)  # (k, 3)
+
+        # Compute covariance matrix: (3, k) @ (k, 3) = (3, 3)
+        cov = torch.matmul(centered.t(), centered) / k  # Use .t() instead of .T
+
         # Get smallest eigenvector (normal direction)
         try:
             _, _, v = torch.svd(cov)
-            normal = v[:, -1]  # Smallest eigenvector
+            normal = v[:, -1]  # Smallest eigenvector (3,)
             normals.append(normal)
         except:
             # Fallback if SVD fails
-            normals.append(torch.tensor([0.0, 1.0, 0.0], device=points.device))
-    
+            normals.append(torch.tensor([0.0, 1.0, 0.0], device=points.device, dtype=points.dtype))
+
     normals = torch.stack(normals)  # (N, 3)
-    
+
     # Normalize
     normals = normals / (torch.norm(normals, dim=1, keepdim=True) + 1e-8)
-    
+
     # Consistency loss: normals of neighbors should be similar
     normal_diff = 0.0
-    for i in range(points.shape[0]):
+    for i in range(N):
         neighbor_normals = normals[knn_idx[i]]  # (k, 3)
         # Cosine similarity (want high similarity = low loss)
         similarity = torch.matmul(neighbor_normals, normals[i])  # (k,)
         normal_diff += torch.mean(1.0 - torch.abs(similarity))
-    
-    return normal_diff / points.shape[0]
+
+    return normal_diff / N
 
 
 def laplacian_smoothness_loss(points, k=10):
     """
     NEW: Laplacian smoothness regularization
     Encourages smooth surfaces by penalizing high curvature
-    
+
     Args:
         points: (N, 3) point cloud
         k: number of neighbors
     """
+    N = points.shape[0]
+
+    # Bounds check: need at least k+1 points
+    if N <= k:
+        k = max(1, N - 1)
+    if k < 1:
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     dist_matrix = torch.cdist(points, points)  # (N, N)
-    
+
     # Get k nearest neighbors
     _, knn_idx = torch.topk(dist_matrix, k=k+1, dim=1, largest=False)  # (N, k+1)
     knn_idx = knn_idx[:, 1:]  # Exclude self
@@ -525,24 +600,43 @@ def coverage_loss(pred_points, gt_points, threshold=0.01):
     return 1.0 - covered
 
 
-def improved_geometry_loss(pred_points, gt_points, 
-                           lambda_chamfer=1.0, 
-                           lambda_coverage=0.1,
-                           lambda_edge=0.05,
-                           lambda_normal=0.01,
-                           lambda_smooth=0.005):
+def geometry_loss(pred_points, pred_normals=None, gt_points=None, 
+                  lambda_chamfer=1.0, 
+                  lambda_normal=0.1,
+                  lambda_edge=0.05,
+                  lambda_smooth=0.02,
+                  lambda_coverage=0.1):
     """
     IMPROVED Combined geometry loss with multiple regularization terms
+    BACKWARD COMPATIBLE with old API
     
     Args:
         pred_points: (N, 3) predicted point cloud
-        gt_points: (M, 3) ground truth vertices
+        pred_normals: (N, 3) predicted surface normals OR gt_points for backward compatibility
+        gt_points: (M, 3) ground truth vertices (optional if using old API)
         lambda_*: weights for each loss component
     
     Returns:
         total_loss: Weighted sum
         loss_dict: Individual losses
+    
+    Usage:
+        # New API (recommended):
+        loss = geometry_loss(pred_points, pred_normals, gt_points)
+        
+        # Old API (backward compatible):
+        loss = geometry_loss(pred_points, gt_points)
     """
+    # Backward compatibility: handle old API geometry_loss(pred_points, gt_points)
+    if gt_points is None and pred_normals is not None:
+        # Old API: geometry_loss(pred_points, gt_points)
+        # Second argument is actually gt_points, not normals
+        gt_points = pred_normals
+        pred_normals = None
+    
+    if gt_points is None:
+        raise ValueError("gt_points is required. Use: geometry_loss(pred_points, pred_normals, gt_points) or geometry_loss(pred_points, gt_points)")
+    
     # Main Chamfer distance
     loss_chamfer = chamfer_distance_simple(pred_points, gt_points)
     
@@ -552,8 +646,13 @@ def improved_geometry_loss(pred_points, gt_points,
     # NEW: Edge length regularization
     loss_edge = edge_length_loss(pred_points, k=10)
     
-    # NEW: Normal consistency
-    loss_normal = normal_consistency_loss(pred_points, k=20)
+    # NEW: Normal consistency (uses predicted normals if available, else estimates)
+    if pred_normals is not None:
+        # Use the predicted normals for consistency loss
+        loss_normal = normal_consistency_with_predicted_normals(pred_points, pred_normals, k=10)
+    else:
+        # Fallback: estimate normals from point cloud
+        loss_normal = normal_consistency_loss(pred_points, k=20)
     
     # NEW: Laplacian smoothness
     loss_smooth = laplacian_smoothness_loss(pred_points, k=10)
@@ -579,5 +678,40 @@ def improved_geometry_loss(pred_points, gt_points,
     return total_loss, loss_dict
 
 
-# Backward compatibility
-geometry_loss = improved_geometry_loss
+def normal_consistency_with_predicted_normals(points, normals, k=10):
+    """
+    Normal consistency loss using predicted normals
+    Ensures neighboring points have similar normal directions
+
+    Args:
+        points: (N, 3) point cloud
+        normals: (N, 3) predicted normals (already normalized)
+        k: number of nearest neighbors
+    """
+    N = points.shape[0]
+
+    # Bounds check: need at least k+1 points
+    if N <= k:
+        k = max(1, N - 1)
+    if k < 1:
+        return torch.tensor(0.0, device=points.device)
+
+    # Compute pairwise distances
+    pred_exp = points.unsqueeze(1)
+    dist = torch.sum((pred_exp - points.unsqueeze(0)) ** 2, dim=-1)
+
+    # Find k nearest neighbors for each point
+    _, indices = torch.topk(dist, k=k+1, largest=False, dim=1)
+    indices = indices[:, 1:]  # Exclude self
+    
+    # Get normals of neighbors
+    neighbor_normals = normals[indices]  # (N, k, 3)
+    
+    # Compute consistency (dot product should be close to 1)
+    normals_exp = normals.unsqueeze(1).expand(-1, k, -1)
+    consistency = torch.sum(normals_exp * neighbor_normals, dim=-1)  # (N, k)
+    
+    # Loss: want high consistency (minimize 1 - consistency)
+    loss = torch.mean(1.0 - consistency)
+    
+    return loss

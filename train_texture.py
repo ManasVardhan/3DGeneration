@@ -83,8 +83,9 @@ class TextureTrainer:
         print("\nInitializing texture model...")
         self.texture_model = VertexColorPredictor(
             feature_dim=config.feature_dim,
-            use_all_views=True
-        ).to(config.device)
+            use_all_views=True,
+            device=config.device
+        )
         
         trainable_params = sum(p.numel() for p in self.texture_model.parameters() if p.requires_grad)
         print(f"✓ Texture model initialized")
@@ -292,7 +293,7 @@ def main():
     print("="*70)
     
     # Check if geometry model exists
-    geometry_checkpoint = Path(config.checkpoint_dir) / "geometry_best.pth"
+    geometry_checkpoint = Path(config.checkpoint_dir) / "geometry_improved_best.pth"
     if not geometry_checkpoint.exists():
         print("\n❌ ERROR: Geometry model not found!")
         print(f"   Expected: {geometry_checkpoint}")

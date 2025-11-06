@@ -11,22 +11,27 @@ import torch.nn.functional as F
 class VertexColorPredictor(nn.Module):
     """Predict RGB colors for each vertex"""
     
-    def __init__(self, feature_dim=1024, use_all_views=True):
+    def __init__(self, feature_dim=1024, use_all_views=True, device='cuda'):
         super().__init__()
-        
+
         self.use_all_views = use_all_views
-        
+        self.device = device
+
         # Image encoder (DINOv2)
         print("Loading DINOv2 for texture prediction...")
         from transformers import AutoModel
-        self.image_encoder = AutoModel.from_pretrained('facebook/dinov2-base')
+        # Load directly to device to avoid .to() issues
+        self.image_encoder = AutoModel.from_pretrained('facebook/dinov2-base').to(device)
         self.image_feat_dim = 768
         print("✓ DINOv2 loaded")
-        
+
         # Freeze image encoder
         for param in self.image_encoder.parameters():
             param.requires_grad = False
-        
+
+        # Set to eval mode since it's frozen
+        self.image_encoder.eval()
+
         # Vertex position encoder
         self.vertex_encoder = nn.Sequential(
             nn.Linear(3, 128),
@@ -36,13 +41,13 @@ class VertexColorPredictor(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, 512)
-        )
-        
+        ).to(device)
+
         # Multi-view aggregation (permutation invariant)
         if use_all_views:
             # Use symmetric pooling instead of attention for permutation invariance
-            self.feature_projection = nn.Linear(self.image_feat_dim * 2, self.image_feat_dim)
-        
+            self.feature_projection = nn.Linear(self.image_feat_dim * 2, self.image_feat_dim).to(device)
+
         # Color decoder
         color_input_dim = self.image_feat_dim + 512
         self.color_decoder = nn.Sequential(
@@ -56,25 +61,36 @@ class VertexColorPredictor(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 3),
             nn.Sigmoid()
-        )
+        ).to(device)
     
     def encode_images(self, images_dict):
-        """Encode images with DINOv2"""
+        """
+        Encode images with DINOv2
+
+        Args:
+            images_dict: Dict with view names as keys, images (B, 3, H, W) as values
+
+        Returns:
+            image_features: (B, 6, 768) if use_all_views else (B, 768)
+        """
         with torch.no_grad():
             if self.use_all_views:
                 features = []
                 for view in ['front', 'back', 'left', 'right', 'top', 'bottom']:
-                    img = images_dict[view]
-                    feat = self.image_encoder(img).last_hidden_state
-                    feat = feat.mean(dim=1)
+                    img = images_dict[view]  # (B, 3, H, W)
+                    # Pass pixel_values explicitly to avoid potential issues
+                    outputs = self.image_encoder(pixel_values=img)
+                    feat = outputs.last_hidden_state  # (B, num_patches, 768)
+                    feat = feat.mean(dim=1)  # (B, 768) - average over patches
                     features.append(feat)
-                
-                image_features = torch.stack(features, dim=1)
+
+                image_features = torch.stack(features, dim=1)  # (B, 6, 768)
             else:
-                img = images_dict['front']
-                feat = self.image_encoder(img).last_hidden_state
-                image_features = feat.mean(dim=1)
-        
+                img = images_dict['front']  # (B, 3, H, W)
+                outputs = self.image_encoder(pixel_values=img)
+                feat = outputs.last_hidden_state  # (B, num_patches, 768)
+                image_features = feat.mean(dim=1)  # (B, 768)
+
         return image_features
     
     def aggregate_multi_view_features(self, image_features):
@@ -101,19 +117,43 @@ class VertexColorPredictor(nn.Module):
         return aggregated
     
     def forward(self, vertices, images_dict):
-        """Predict colors for vertices"""
+        """
+        Predict colors for vertices
+
+        Args:
+            vertices: (N, 3) vertex positions
+            images_dict: Dict of images for each view
+
+        Returns:
+            colors: (N, 3) RGB colors for each vertex
+        """
         N = vertices.shape[0]
-        
-        vert_feat = self.vertex_encoder(vertices)
-        image_features = self.encode_images(images_dict)
-        
+
+        # Encode vertex positions
+        vert_feat = self.vertex_encoder(vertices)  # (N, 512)
+
+        # Encode images
+        image_features = self.encode_images(images_dict)  # (B, 6, 768) or (B, 768)
+
+        # Aggregate multi-view features if using all views
         if self.use_all_views:
-            image_features = self.aggregate_multi_view_features(image_features)
-        
-        img_feat_exp = image_features.expand(N, -1)
-        combined = torch.cat([img_feat_exp, vert_feat], dim=-1)
-        colors = self.color_decoder(combined)
-        
+            image_features = self.aggregate_multi_view_features(image_features)  # (B, 768)
+
+        # Handle batch dimension - take first batch item
+        # image_features is (B, 768), we need (768,) then expand to (N, 768)
+        if image_features.dim() == 2:
+            # Take first item from batch
+            img_feat = image_features[0]  # (768,)
+        else:
+            img_feat = image_features
+
+        # Expand to match number of vertices
+        img_feat_exp = img_feat.unsqueeze(0).expand(N, -1)  # (N, 768)
+
+        # Combine features and decode colors
+        combined = torch.cat([img_feat_exp, vert_feat], dim=-1)  # (N, 768+512)
+        colors = self.color_decoder(combined)  # (N, 3)
+
         return colors
 
 
