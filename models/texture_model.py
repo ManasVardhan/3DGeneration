@@ -11,22 +11,27 @@ import torch.nn.functional as F
 class VertexColorPredictor(nn.Module):
     """Predict RGB colors for each vertex"""
     
-    def __init__(self, feature_dim=1024, use_all_views=True):
+    def __init__(self, feature_dim=1024, use_all_views=True, device='cuda'):
         super().__init__()
-        
+
         self.use_all_views = use_all_views
-        
+        self.device = device
+
         # Image encoder (DINOv2)
         print("Loading DINOv2 for texture prediction...")
         from transformers import AutoModel
-        self.image_encoder = AutoModel.from_pretrained('facebook/dinov2-base')
+        # Load directly to device to avoid .to() issues
+        self.image_encoder = AutoModel.from_pretrained('facebook/dinov2-base').to(device)
         self.image_feat_dim = 768
         print("✓ DINOv2 loaded")
-        
+
         # Freeze image encoder
         for param in self.image_encoder.parameters():
             param.requires_grad = False
-        
+
+        # Set to eval mode since it's frozen
+        self.image_encoder.eval()
+
         # Vertex position encoder
         self.vertex_encoder = nn.Sequential(
             nn.Linear(3, 128),
@@ -36,13 +41,13 @@ class VertexColorPredictor(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, 512)
-        )
-        
+        ).to(device)
+
         # Multi-view aggregation (permutation invariant)
         if use_all_views:
             # Use symmetric pooling instead of attention for permutation invariance
-            self.feature_projection = nn.Linear(self.image_feat_dim * 2, self.image_feat_dim)
-        
+            self.feature_projection = nn.Linear(self.image_feat_dim * 2, self.image_feat_dim).to(device)
+
         # Color decoder
         color_input_dim = self.image_feat_dim + 512
         self.color_decoder = nn.Sequential(
@@ -56,7 +61,7 @@ class VertexColorPredictor(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 3),
             nn.Sigmoid()
-        )
+        ).to(device)
     
     def encode_images(self, images_dict):
         """

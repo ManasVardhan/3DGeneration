@@ -83,8 +83,9 @@ class TextureTrainer:
         print("\nInitializing texture model...")
         self.texture_model = VertexColorPredictor(
             feature_dim=config.feature_dim,
-            use_all_views=True
-        ).to(config.device)
+            use_all_views=True,
+            device=config.device
+        )
         
         trainable_params = sum(p.numel() for p in self.texture_model.parameters() if p.requires_grad)
         print(f"✓ Texture model initialized")

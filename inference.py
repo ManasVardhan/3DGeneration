@@ -43,7 +43,7 @@ class MeshGenerator:
         print("✓ Geometry model loaded")
         
         # Load texture model
-        self.texture_model = VertexColorPredictor().to(self.device)
+        self.texture_model = VertexColorPredictor(device=self.device)
         self.texture_model.load_state_dict(
             torch.load(texture_checkpoint, map_location=self.device)
         )

@@ -487,51 +487,59 @@ def normal_consistency_loss(points, k=20):
     """
     NEW: Encourage consistent surface normals
     Helps create smooth surfaces with proper orientation
-    
+
     Args:
         points: (N, 3) point cloud
         k: number of neighbors for normal estimation
     """
+    N = points.shape[0]
+
+    # If too few points, reduce k
+    k = min(k, N - 1)
+    if k < 3:
+        # Not enough points for normal estimation
+        return torch.tensor(0.0, device=points.device)
+
     # Compute pairwise distances
     dist_matrix = torch.cdist(points, points)  # (N, N)
-    
+
     # Get k nearest neighbors
     _, knn_idx = torch.topk(dist_matrix, k=k, dim=1, largest=False)  # (N, k)
-    
+
     # For each point, estimate normal from neighbors
     normals = []
-    for i in range(points.shape[0]):
+    for i in range(N):
         neighbors = points[knn_idx[i]]  # (k, 3)
-        
+
         # Center the neighbors
-        centered = neighbors - neighbors.mean(dim=0, keepdim=True)
-        
-        # Compute covariance matrix
-        cov = torch.matmul(centered.T, centered) / k
-        
+        centered = neighbors - neighbors.mean(dim=0, keepdim=True)  # (k, 3)
+
+        # Compute covariance matrix: (3, k) @ (k, 3) = (3, 3)
+        cov = torch.matmul(centered.t(), centered) / k  # Use .t() instead of .T
+
         # Get smallest eigenvector (normal direction)
         try:
             _, _, v = torch.svd(cov)
-            normal = v[:, -1]  # Smallest eigenvector
+            normal = v[:, -1]  # Smallest eigenvector (3,)
             normals.append(normal)
         except:
             # Fallback if SVD fails
-            normals.append(torch.tensor([0.0, 1.0, 0.0], device=points.device))
-    
+            normals.append(torch.tensor([0.0, 1.0, 0.0], device=points.device, dtype=points.dtype))
+
     normals = torch.stack(normals)  # (N, 3)
-    
+
     # Normalize
     normals = normals / (torch.norm(normals, dim=1, keepdim=True) + 1e-8)
-    
+
     # Consistency loss: normals of neighbors should be similar
     normal_diff = 0.0
-    for i in range(points.shape[0]):
+    for i in range(N):
         neighbor_normals = normals[knn_idx[i]]  # (k, 3)
         # Cosine similarity (want high similarity = low loss)
         similarity = torch.matmul(neighbor_normals, normals[i])  # (k,)
         normal_diff += torch.mean(1.0 - torch.abs(similarity))
-    
-    return normal_diff / points.shape[0]
+
+    return normal_diff / N
 
 
 def laplacian_smoothness_loss(points, k=10):
