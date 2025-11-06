@@ -525,7 +525,7 @@ def coverage_loss(pred_points, gt_points, threshold=0.01):
     return 1.0 - covered
 
 
-def geometry_loss(pred_points, pred_normals, gt_points, 
+def geometry_loss(pred_points, pred_normals=None, gt_points=None, 
                   lambda_chamfer=1.0, 
                   lambda_normal=0.1,
                   lambda_edge=0.05,
@@ -533,17 +533,35 @@ def geometry_loss(pred_points, pred_normals, gt_points,
                   lambda_coverage=0.1):
     """
     IMPROVED Combined geometry loss with multiple regularization terms
+    BACKWARD COMPATIBLE with old API
     
     Args:
         pred_points: (N, 3) predicted point cloud
-        pred_normals: (N, 3) predicted surface normals (can be None for old API)
-        gt_points: (M, 3) ground truth vertices
+        pred_normals: (N, 3) predicted surface normals OR gt_points for backward compatibility
+        gt_points: (M, 3) ground truth vertices (optional if using old API)
         lambda_*: weights for each loss component
     
     Returns:
         total_loss: Weighted sum
         loss_dict: Individual losses
+    
+    Usage:
+        # New API (recommended):
+        loss = geometry_loss(pred_points, pred_normals, gt_points)
+        
+        # Old API (backward compatible):
+        loss = geometry_loss(pred_points, gt_points)
     """
+    # Backward compatibility: handle old API geometry_loss(pred_points, gt_points)
+    if gt_points is None and pred_normals is not None:
+        # Old API: geometry_loss(pred_points, gt_points)
+        # Second argument is actually gt_points, not normals
+        gt_points = pred_normals
+        pred_normals = None
+    
+    if gt_points is None:
+        raise ValueError("gt_points is required. Use: geometry_loss(pred_points, pred_normals, gt_points) or geometry_loss(pred_points, gt_points)")
+    
     # Main Chamfer distance
     loss_chamfer = chamfer_distance_simple(pred_points, gt_points)
     
@@ -556,7 +574,6 @@ def geometry_loss(pred_points, pred_normals, gt_points,
     # NEW: Normal consistency (uses predicted normals if available, else estimates)
     if pred_normals is not None:
         # Use the predicted normals for consistency loss
-        # We want neighboring points to have similar normals
         loss_normal = normal_consistency_with_predicted_normals(pred_points, pred_normals, k=10)
     else:
         # Fallback: estimate normals from point cloud

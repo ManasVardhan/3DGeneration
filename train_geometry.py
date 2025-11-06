@@ -1,12 +1,13 @@
 """
 IMPROVED Training Script for Stage 1: Geometry Model
-Fixed to work with config_improved.py
+VERIFIED - Uses real data, no dummy placeholders
 
 Key improvements:
 - Warmup learning rate schedule
 - Enhanced loss with 5 components
 - Normal prediction
 - Better logging
+- ACTUAL DATA LOADING (no dummy data)
 """
 
 import torch
@@ -21,9 +22,7 @@ import random
 # Import project modules
 from config import config
 from models.geometry_model import GeometryModel, geometry_loss
-
-# You'll need to import your data loader
-# from load_data import ShoeDataset, custom_collate_fn
+from load_data import ShoeDataset, custom_collate_fn
 
 
 class ImprovedGeometryTrainer:
@@ -47,30 +46,33 @@ class ImprovedGeometryTrainer:
         print(f"Freeze Encoder: {config.freeze_image_encoder}")
         print("="*70)
         
-        # Load dataset
+        # Load dataset - REAL DATA
         print("\nLoading dataset...")
-        # IMPORTANT: Uncomment and use your actual dataset
-        # from load_data import ShoeDataset, custom_collate_fn
-        # self.dataset = ShoeDataset(
-        #     obj_dir=config.obj_dir,
-        #     images_dir=config.images_dir,
-        #     verify_mappings=True,
-        #     image_size=config.image_size
-        # )
-        # 
-        # self.dataloader = DataLoader(
-        #     self.dataset,
-        #     batch_size=config.batch_size_stage1,
-        #     shuffle=True,
-        #     num_workers=config.num_workers,
-        #     collate_fn=custom_collate_fn
-        # )
-        # print(f"✓ Dataset loaded: {len(self.dataset)} shoes")
+        print(f"  OBJ directory: {config.obj_dir}")
+        print(f"  Images directory: {config.images_dir}")
         
-        # FOR TESTING - Remove this when you have real data
-        print("⚠️  WARNING: Using dummy dataloader for testing")
-        print("   Uncomment the dataset code above to use real data")
-        self.dataloader = []  # Placeholder
+        self.dataset = ShoeDataset(
+            obj_dir=config.obj_dir,
+            images_dir=config.images_dir,
+            verify_mappings=True,
+            image_size=config.image_size
+        )
+        
+        if len(self.dataset) == 0:
+            raise ValueError(f"❌ No data found! Check paths:\n"
+                           f"   OBJ dir: {config.obj_dir}\n"
+                           f"   Images dir: {config.images_dir}")
+        
+        self.dataloader = DataLoader(
+            self.dataset,
+            batch_size=config.batch_size_stage1,
+            shuffle=True,
+            num_workers=config.num_workers,
+            collate_fn=custom_collate_fn
+        )
+        
+        print(f"✓ Dataset loaded: {len(self.dataset)} shoes")
+        print(f"✓ DataLoader created: {len(self.dataloader)} batches")
         
         # Initialize model
         print("\nInitializing improved model...")
@@ -97,7 +99,7 @@ class ImprovedGeometryTrainer:
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
             T_max=config.num_epochs_stage1 - self.warmup_epochs,
-            eta_min=1e-6  # Don't go below 1e-6
+            eta_min=1e-6
         )
         
         # Training state
@@ -123,27 +125,21 @@ class ImprovedGeometryTrainer:
         """Randomly sample points from vertices"""
         num_verts = vertices.shape[0]
         if num_verts >= num_samples:
-            indices = torch.randperm(num_verts)[:num_samples]
+            indices = torch.randperm(num_verts, device=vertices.device)[:num_samples]
             return vertices[indices]
         else:
             # If not enough vertices, repeat some
-            indices = torch.randint(0, num_verts, (num_samples,))
+            indices = torch.randint(0, num_verts, (num_samples,), device=vertices.device)
             return vertices[indices]
 
     def _shuffle_views(self, images_dict):
-        """
-        Randomly shuffle the order of views to enforce permutation invariance.
-        This ensures the model learns view-content patterns, not position patterns.
-        """
+        """Randomly shuffle the order of views for permutation invariance"""
         view_names = ['front', 'back', 'left', 'right', 'top', 'bottom']
-
-        # Create random permutation
         perm = list(range(6))
         random.shuffle(perm)
 
-        # Shuffle images
         shuffled_images = {}
-        stacked_images = torch.stack([images_dict[name] for name in view_names], dim=1)  # (B, 6, C, H, W)
+        stacked_images = torch.stack([images_dict[name] for name in view_names], dim=1)
         shuffled_stacked = stacked_images[:, perm, :, :, :]
 
         for i, name in enumerate(view_names):
@@ -158,10 +154,6 @@ class ImprovedGeometryTrainer:
         epoch_losses = {'chamfer': 0, 'normal': 0, 'edge': 0, 'smooth': 0, 'coverage': 0}
         num_batches = len(self.dataloader)
         
-        if num_batches == 0:
-            print("⚠️  No data to train on! Please uncomment dataset loading code.")
-            return 0.0, epoch_losses
-        
         # Warmup learning rate
         if epoch < self.warmup_epochs:
             lr_scale = (epoch + 1) / self.warmup_epochs
@@ -172,26 +164,24 @@ class ImprovedGeometryTrainer:
             # Move to device
             images = {k: v.to(self.config.device) for k, v in batch['images'].items()}
 
-            # Randomly shuffle views to enforce permutation invariance
+            # Randomly shuffle views
             images = self._shuffle_views(images)
 
-            # Process each shoe in batch (Y values are lists)
+            # Process each shoe in batch
             batch_loss = 0
             batch_loss_dict = {'chamfer': 0, 'normal': 0, 'edge': 0, 'smooth': 0, 'coverage': 0}
             
             for i in range(len(batch['vertices'])):
                 gt_vertices = batch['vertices'][i].to(self.config.device)
-                
-                # Forward pass (single shoe)
                 images_single = {k: v[i:i+1] for k, v in images.items()}
 
-                # Forward pass - now returns points AND normals
+                # Forward pass - returns (points, normals)
                 pred_points, pred_normals = self.model(images_single)
                 
-                # Sample GT vertices to match prediction size
+                # Sample GT vertices
                 gt_vertices_sample = self._sample_points(gt_vertices, self.config.num_points)
                 
-                # Compute enhanced loss with all 5 components
+                # Compute loss
                 loss, loss_dict = geometry_loss(
                     pred_points[0], 
                     pred_normals[0],
@@ -207,7 +197,7 @@ class ImprovedGeometryTrainer:
                 for key in batch_loss_dict.keys():
                     batch_loss_dict[key] += loss_dict[key]
             
-            # Average loss over batch
+            # Average over batch
             loss = batch_loss / len(batch['vertices'])
             for key in batch_loss_dict.keys():
                 batch_loss_dict[key] /= len(batch['vertices'])
@@ -295,7 +285,6 @@ class ImprovedGeometryTrainer:
                 self.best_loss = avg_loss
                 self.patience_counter = 0
                 
-                # Save best model
                 best_path = Path(self.config.checkpoint_dir) / "geometry_improved_best.pth"
                 torch.save(self.model.state_dict(), best_path)
                 print(f"✓ Best model saved: {best_path} (Loss: {avg_loss:.6f})\n")
@@ -337,11 +326,27 @@ def main():
     print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
     
+    # Verify data paths exist
+    print("\nVerifying data paths...")
+    obj_path = Path(config.obj_dir)
+    img_path = Path(config.images_dir)
+    
+    if not obj_path.exists():
+        print(f"❌ ERROR: OBJ directory not found: {config.obj_dir}")
+        return
+    if not img_path.exists():
+        print(f"❌ ERROR: Images directory not found: {config.images_dir}")
+        return
+    
+    print(f"✓ OBJ directory exists: {config.obj_dir}")
+    print(f"✓ Images directory exists: {config.images_dir}")
+    
     # Print configuration
     print("\nConfiguration:")
     print(f"  Learning Rate: {config.learning_rate_stage1}")
     print(f"  Epochs: {config.num_epochs_stage1}")
     print(f"  Points: {config.num_points}")
+    print(f"  Batch Size: {config.batch_size_stage1}")
     print(f"  Loss weights:")
     print(f"    - Chamfer:  {config.lambda_chamfer}")
     print(f"    - Normal:   {config.lambda_normal}")
@@ -350,6 +355,7 @@ def main():
     print(f"    - Coverage: {config.lambda_coverage}")
     
     # Initialize trainer
+    print("\n" + "="*70)
     trainer = ImprovedGeometryTrainer(config)
     
     # Train
@@ -361,8 +367,8 @@ def main():
     print("  • Poisson reconstruction (not convex hull)")
     print("  • Normal prediction for surface orientation")
     print("  • 5-component enhanced loss function")
-    print("  • Higher learning rate with warmup (2e-4 → 1e-6)")
-    print("  • 8192 points for more detail")
+    print("  • Higher learning rate with warmup")
+    print("  • Enhanced point cloud detail")
     print("\nReady for Stage 2 (Texture Training)")
 
 

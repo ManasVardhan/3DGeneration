@@ -292,7 +292,7 @@ def main():
     print("="*70)
     
     # Check if geometry model exists
-    geometry_checkpoint = Path(config.checkpoint_dir) / "geometry_best.pth"
+    geometry_checkpoint = Path(config.checkpoint_dir) / "geometry_improved_best.pth"
     if not geometry_checkpoint.exists():
         print("\n❌ ERROR: Geometry model not found!")
         print(f"   Expected: {geometry_checkpoint}")
