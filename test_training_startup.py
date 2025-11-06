@@ -302,7 +302,7 @@ def test_geometry_training_step():
         # Forward pass
         print(f"    Forward...")
         images_single = {k: v[0:1] for k, v in images.items()}
-        pred_points = model(images_single)
+        pred_points, pred_normals = model(images_single)
 
         # Loss
         print(f"    Loss computation...")
