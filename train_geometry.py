@@ -278,16 +278,30 @@ class ImprovedGeometryTrainer:
                     'loss': avg_loss,
                     'history': self.train_history
                 }, checkpoint_path)
-                print(f"✓ Checkpoint saved: {checkpoint_path}\n")
+
+                # Save training history at each checkpoint
+                history_path = Path(self.config.log_dir) / "geometry_improved_training_history.json"
+                with open(history_path, 'w') as f:
+                    json.dump(self.train_history, f, indent=2)
+
+                print(f"✓ Checkpoint saved: {checkpoint_path}")
+                print(f"✓ Training history saved: {history_path}\n")
             
             # Early stopping
             if avg_loss < self.best_loss - self.config.min_delta:
                 self.best_loss = avg_loss
                 self.patience_counter = 0
-                
+
                 best_path = Path(self.config.checkpoint_dir) / "geometry_improved_best.pth"
                 torch.save(self.model.state_dict(), best_path)
-                print(f"✓ Best model saved: {best_path} (Loss: {avg_loss:.6f})\n")
+
+                # Save training history when best model is saved
+                history_path = Path(self.config.log_dir) / "geometry_improved_training_history.json"
+                with open(history_path, 'w') as f:
+                    json.dump(self.train_history, f, indent=2)
+
+                print(f"✓ Best model saved: {best_path} (Loss: {avg_loss:.6f})")
+                print(f"✓ Training history saved: {history_path}\n")
             else:
                 self.patience_counter += 1
                 print(f"⚠️  No improvement for {self.patience_counter} epochs\n")
