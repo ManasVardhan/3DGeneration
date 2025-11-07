@@ -27,14 +27,14 @@ from load_data import ShoeDataset, custom_collate_fn
 
 class ImprovedGeometryTrainer:
     """Improved Trainer for Stage 1: Geometry prediction"""
-    
+
     def __init__(self, config):
         self.config = config
-        
+
         # Create directories
         Path(config.checkpoint_dir).mkdir(exist_ok=True, parents=True)
         Path(config.log_dir).mkdir(exist_ok=True, parents=True)
-        
+
         print("="*70)
         print("STAGE 1: IMPROVED GEOMETRY MODEL TRAINING")
         print("="*70)
@@ -45,24 +45,24 @@ class ImprovedGeometryTrainer:
         print(f"Point Cloud Size: {config.num_points}")
         print(f"Freeze Encoder: {config.freeze_image_encoder}")
         print("="*70)
-        
+
         # Load dataset - REAL DATA
         print("\nLoading dataset...")
         print(f"  OBJ directory: {config.obj_dir}")
         print(f"  Images directory: {config.images_dir}")
-        
+
         self.dataset = ShoeDataset(
             obj_dir=config.obj_dir,
             images_dir=config.images_dir,
             verify_mappings=True,
             image_size=config.image_size
         )
-        
+
         if len(self.dataset) == 0:
             raise ValueError(f"❌ No data found! Check paths:\n"
                            f"   OBJ dir: {config.obj_dir}\n"
                            f"   Images dir: {config.images_dir}")
-        
+
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=config.batch_size_stage1,
@@ -70,10 +70,10 @@ class ImprovedGeometryTrainer:
             num_workers=config.num_workers,
             collate_fn=custom_collate_fn
         )
-        
+
         print(f"✓ Dataset loaded: {len(self.dataset)} shoes")
         print(f"✓ DataLoader created: {len(self.dataloader)} batches")
-        
+
         # Initialize model
         print("\nInitializing improved model...")
         self.model = GeometryModel(
@@ -81,19 +81,19 @@ class ImprovedGeometryTrainer:
             freeze_encoder=config.freeze_image_encoder,
             hidden_dim=config.hidden_dim
         ).to(config.device)
-        
+
         total_params, trainable_params = self.model.count_parameters()
         print(f"✓ Model initialized")
         print(f"  Total parameters: {total_params:,}")
         print(f"  Trainable parameters: {trainable_params:,}")
-        
+
         # Optimizer
         self.optimizer = optim.AdamW(
             self.model.get_trainable_parameters(),
             lr=config.learning_rate_stage1,
             weight_decay=config.weight_decay_stage1
         )
-        
+
         # Learning rate scheduler with warmup
         self.warmup_epochs = 5
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -101,13 +101,13 @@ class ImprovedGeometryTrainer:
             T_max=config.num_epochs_stage1 - self.warmup_epochs,
             eta_min=1e-6
         )
-        
+
         # Training state
         self.best_loss = float('inf')
         self.patience_counter = 0
         self.train_history = {
-            'epoch': [], 
-            'loss': [], 
+            'epoch': [],
+            'loss': [],
             'chamfer': [],
             'normal': [],
             'edge': [],
@@ -115,12 +115,12 @@ class ImprovedGeometryTrainer:
             'coverage': [],
             'lr': []
         }
-        
+
         print(f"\n✓ Trainer initialized")
         print(f"  Warmup epochs: {self.warmup_epochs}")
         print(f"  Scheduler: CosineAnnealingLR (min LR: 1e-6)")
         print(f"  Early stopping patience: {config.patience}")
-    
+
     def _sample_points(self, vertices, num_samples):
         """Randomly sample points from vertices"""
         num_verts = vertices.shape[0]
@@ -146,20 +146,20 @@ class ImprovedGeometryTrainer:
             shuffled_images[name] = shuffled_stacked[:, i, :, :, :]
 
         return shuffled_images
-    
+
     def train_epoch(self, epoch):
         """Train for one epoch"""
         self.model.train()
         epoch_loss = 0
         epoch_losses = {'chamfer': 0, 'normal': 0, 'edge': 0, 'smooth': 0, 'coverage': 0}
         num_batches = len(self.dataloader)
-        
+
         # Warmup learning rate
         if epoch < self.warmup_epochs:
             lr_scale = (epoch + 1) / self.warmup_epochs
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.config.learning_rate_stage1 * lr_scale
-        
+
         for batch_idx, batch in enumerate(self.dataloader):
             # Move to device
             images = {k: v.to(self.config.device) for k, v in batch['images'].items()}
@@ -170,20 +170,20 @@ class ImprovedGeometryTrainer:
             # Process each shoe in batch
             batch_loss = 0
             batch_loss_dict = {'chamfer': 0, 'normal': 0, 'edge': 0, 'smooth': 0, 'coverage': 0}
-            
+
             for i in range(len(batch['vertices'])):
                 gt_vertices = batch['vertices'][i].to(self.config.device)
                 images_single = {k: v[i:i+1] for k, v in images.items()}
 
                 # Forward pass - returns (points, normals)
                 pred_points, pred_normals = self.model(images_single)
-                
+
                 # Sample GT vertices
                 gt_vertices_sample = self._sample_points(gt_vertices, self.config.num_points)
-                
+
                 # Compute loss
                 loss, loss_dict = geometry_loss(
-                    pred_points[0], 
+                    pred_points[0],
                     pred_normals[0],
                     gt_vertices_sample,
                     lambda_chamfer=self.config.lambda_chamfer,
@@ -192,26 +192,26 @@ class ImprovedGeometryTrainer:
                     lambda_smooth=self.config.lambda_smooth,
                     lambda_coverage=self.config.lambda_coverage
                 )
-                
+
                 batch_loss += loss
                 for key in batch_loss_dict.keys():
                     batch_loss_dict[key] += loss_dict[key]
-            
+
             # Average over batch
             loss = batch_loss / len(batch['vertices'])
             for key in batch_loss_dict.keys():
                 batch_loss_dict[key] /= len(batch['vertices'])
-            
+
             # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), 1.0)
             self.optimizer.step()
-            
+
             epoch_loss += loss.item()
             for key in epoch_losses.keys():
                 epoch_losses[key] += batch_loss_dict[key]
-            
+
             # Logging
             if batch_idx % self.config.log_interval == 0:
                 progress = (batch_idx + 1) / num_batches * 100
@@ -221,34 +221,34 @@ class ImprovedGeometryTrainer:
                       f"Chamfer: {batch_loss_dict['chamfer']:.6f} | "
                       f"Normal: {batch_loss_dict['normal']:.6f} | "
                       f"Edge: {batch_loss_dict['edge']:.6f}")
-        
+
         avg_loss = epoch_loss / num_batches
         avg_losses = {k: v / num_batches for k, v in epoch_losses.items()}
-        
+
         return avg_loss, avg_losses
-    
+
     def train(self):
         """Main training loop"""
         print("\n" + "="*70)
         print("STARTING IMPROVED TRAINING")
         print("="*70)
-        
+
         start_time = time.time()
-        
+
         for epoch in range(self.config.num_epochs_stage1):
             epoch_start = time.time()
-            
+
             # Train one epoch
             avg_loss, avg_losses = self.train_epoch(epoch)
-            
+
             # Step scheduler after warmup
             if epoch >= self.warmup_epochs:
                 self.scheduler.step()
-            
+
             # Epoch summary
             epoch_time = time.time() - epoch_start
             current_lr = self.optimizer.param_groups[0]['lr']
-            
+
             print(f"\n{'─'*70}")
             print(f"Epoch {epoch+1}/{self.config.num_epochs_stage1} Summary:")
             print(f"  Total Loss:    {avg_loss:.6f}")
@@ -260,14 +260,14 @@ class ImprovedGeometryTrainer:
             print(f"  Time:          {epoch_time:.2f}s")
             print(f"  Learning Rate: {current_lr:.2e}")
             print(f"{'─'*70}\n")
-            
+
             # Save history
             self.train_history['epoch'].append(epoch + 1)
             self.train_history['loss'].append(avg_loss)
             self.train_history['lr'].append(current_lr)
             for key in avg_losses.keys():
                 self.train_history[key].append(avg_losses[key])
-            
+
             # Save checkpoint
             if (epoch + 1) % self.config.save_interval == 0:
                 checkpoint_path = Path(self.config.checkpoint_dir) / f"geometry_improved_epoch{epoch+1}.pth"
@@ -286,7 +286,7 @@ class ImprovedGeometryTrainer:
 
                 print(f"✓ Checkpoint saved: {checkpoint_path}")
                 print(f"✓ Training history saved: {history_path}\n")
-            
+
             # Early stopping
             if avg_loss < self.best_loss - self.config.min_delta:
                 self.best_loss = avg_loss
@@ -305,16 +305,16 @@ class ImprovedGeometryTrainer:
             else:
                 self.patience_counter += 1
                 print(f"⚠️  No improvement for {self.patience_counter} epochs\n")
-                
+
                 if self.patience_counter >= self.config.patience:
                     print(f"Early stopping triggered at epoch {epoch+1}")
                     break
-        
+
         # Training complete
         total_time = time.time() - start_time
         hours = int(total_time // 3600)
         minutes = int((total_time % 3600) // 60)
-        
+
         print("\n" + "="*70)
         print("IMPROVED STAGE 1 TRAINING COMPLETE")
         print("="*70)
@@ -322,13 +322,13 @@ class ImprovedGeometryTrainer:
         print(f"Best loss: {self.best_loss:.6f}")
         print(f"Final model: {self.config.checkpoint_dir}/geometry_improved_best.pth")
         print("="*70)
-        
+
         # Save training history
         history_path = Path(self.config.log_dir) / "geometry_improved_training_history.json"
         with open(history_path, 'w') as f:
             json.dump(self.train_history, f, indent=2)
         print(f"\n✓ Training history saved: {history_path}")
-        
+
         return self.model
 
 
@@ -339,22 +339,22 @@ def main():
     print("="*70)
     print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
-    
+
     # Verify data paths exist
     print("\nVerifying data paths...")
     obj_path = Path(config.obj_dir)
     img_path = Path(config.images_dir)
-    
+
     if not obj_path.exists():
         print(f"❌ ERROR: OBJ directory not found: {config.obj_dir}")
         return
     if not img_path.exists():
         print(f"❌ ERROR: Images directory not found: {config.images_dir}")
         return
-    
+
     print(f"✓ OBJ directory exists: {config.obj_dir}")
     print(f"✓ Images directory exists: {config.images_dir}")
-    
+
     # Print configuration
     print("\nConfiguration:")
     print(f"  Learning Rate: {config.learning_rate_stage1}")
@@ -367,14 +367,14 @@ def main():
     print(f"    - Edge:     {config.lambda_edge}")
     print(f"    - Smooth:   {config.lambda_smooth}")
     print(f"    - Coverage: {config.lambda_coverage}")
-    
+
     # Initialize trainer
     print("\n" + "="*70)
     trainer = ImprovedGeometryTrainer(config)
-    
+
     # Train
     model = trainer.train()
-    
+
     print(f"\nEnd Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("\n✅ Improved Stage 1 Complete!")
     print("\nKey improvements applied:")
