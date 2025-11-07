@@ -1,6 +1,6 @@
 """
 Smoke Test for CURRENT Point Cloud Training Pipeline
-Tests the actual geometry model and training you're using
+Tests the actual geometry model and training 
 """
 
 import torch
