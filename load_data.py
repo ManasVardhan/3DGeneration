@@ -1,6 +1,6 @@
 """
-Dataset Loader for Multi-View to 3D Mesh Training
-Loads X (images) and Y (3D meshes) with proper ID mapping
+UPDATED: Dataset Loader for Multi-View to 3D Mesh Training
+Now handles OBJ files in subdirectories
 """
 
 import torch
@@ -12,7 +12,7 @@ import trimesh
 
 
 # ============================================================================
-# OBJ to Training Target Converter
+# OBJ to Training Target Converter (unchanged)
 # ============================================================================
 
 class OBJToTrainingTarget:
@@ -35,9 +35,9 @@ class OBJToTrainingTarget:
         
         print(f"  Original: {len(vertices)} vertices, {len(faces)} faces")
         
-        # Simplify if too many vertices
+        # Optional simplification if too many vertices
         if len(vertices) > self.max_vertices:
-            print(f"  Simplifying mesh to ~{self.max_vertices} vertices...")
+            print(f"  Simplifying mesh to ≤ {self.max_vertices} vertices...")
             target_faces = int((self.max_vertices / len(vertices)) * len(faces))
             try:
                 mesh = mesh.simplify_quadric_decimation(target_faces)
@@ -50,7 +50,7 @@ class OBJToTrainingTarget:
         # Normalize mesh
         if self.normalize:
             vertices = self._normalize_vertices(vertices)
-            print(f"  Normalized to [-1, 1] cube")
+            print(f"  Normalized to unit sphere")
         
         # Extract vertex colors
         vertex_colors = self._extract_vertex_colors(mesh, len(vertices))
@@ -58,19 +58,12 @@ class OBJToTrainingTarget:
         # Compute vertex normals
         vertex_normals = self._compute_vertex_normals(mesh, vertices, faces)
         
-        # Convert to PyTorch tensors
+        # Pack into dictionary
         y_values = {
-            'vertices': torch.from_numpy(vertices).float(),
-            'faces': torch.from_numpy(faces).long(),
-            'vertex_colors': torch.from_numpy(vertex_colors).float(),
-            'vertex_normals': torch.from_numpy(vertex_normals).float(),
-            'mesh_stats': {
-                'num_vertices': len(vertices),
-                'num_faces': len(faces),
-                'bbox_min': vertices.min(axis=0).tolist(),
-                'bbox_max': vertices.max(axis=0).tolist(),
-                'has_colors': vertex_colors.max() > 0
-            }
+            'vertices': vertices.astype(np.float32),
+            'faces': faces.astype(np.int64),
+            'vertex_colors': vertex_colors,
+            'vertex_normals': vertex_normals.astype(np.float32)
         }
         
         print(f"  ✓ Converted to training target")
@@ -78,14 +71,12 @@ class OBJToTrainingTarget:
         return y_values
     
     def _normalize_vertices(self, vertices):
-        """Center at origin and normalize to [-1, 1] cube"""
+        """Center at origin and normalize to unit sphere"""
         centroid = vertices.mean(axis=0)
         vertices = vertices - centroid
-        
-        max_dist = np.abs(vertices).max()
+        max_dist = np.linalg.norm(vertices, axis=1).max()
         if max_dist > 0:
             vertices = vertices / max_dist
-        
         return vertices
     
     def _extract_vertex_colors(self, mesh, num_vertices):
@@ -119,26 +110,22 @@ class OBJToTrainingTarget:
         return np.ones((num_vertices, 3), dtype=np.float32)
     
     def _sample_texture_at_vertices(self, mesh):
-        """Sample texture image at UV coordinates"""
-        if not hasattr(mesh.visual, 'uv'):
+        """Sample texture at vertex UV coordinates"""
+        if not hasattr(mesh.visual, 'material'):
             return None
-        
         if not hasattr(mesh.visual.material, 'image'):
             return None
         
         texture_img = np.array(mesh.visual.material.image).astype(np.float32) / 255.0
         h, w = texture_img.shape[:2]
-        
         uv = mesh.visual.uv
         
         u_coords = (uv[:, 0] * (w - 1)).astype(np.int32)
         v_coords = ((1 - uv[:, 1]) * (h - 1)).astype(np.int32)
-        
         u_coords = np.clip(u_coords, 0, w - 1)
         v_coords = np.clip(v_coords, 0, h - 1)
         
         colors = texture_img[v_coords, u_coords, :3]
-        
         return colors.astype(np.float32)
     
     def _compute_vertex_normals(self, mesh, vertices, faces):
@@ -147,62 +134,114 @@ class OBJToTrainingTarget:
             normals = mesh.vertex_normals.copy()
         except:
             normals = self._compute_normals_manual(vertices, faces)
-        
         return normals.astype(np.float32)
     
     def _compute_normals_manual(self, vertices, faces):
         """Manually compute vertex normals"""
         normals = np.zeros_like(vertices)
         
-        v0 = vertices[faces[:, 0]]
-        v1 = vertices[faces[:, 1]]
-        v2 = vertices[faces[:, 2]]
+        for face in faces:
+            v0, v1, v2 = vertices[face]
+            edge1 = v1 - v0
+            edge2 = v2 - v0
+            face_normal = np.cross(edge1, edge2)
+            norm = np.linalg.norm(face_normal)
+            if norm > 0:
+                face_normal = face_normal / norm
+            for idx in face:
+                normals[idx] += face_normal
         
-        face_normals = np.cross(v1 - v0, v2 - v0)
-        face_normals = face_normals / (np.linalg.norm(face_normals, axis=1, keepdims=True) + 1e-8)
-        
-        for i in range(len(faces)):
-            normals[faces[i, 0]] += face_normals[i]
-            normals[faces[i, 1]] += face_normals[i]
-            normals[faces[i, 2]] += face_normals[i]
-        
-        normals = normals / (np.linalg.norm(normals, axis=1, keepdims=True) + 1e-8)
-        
+        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        valid = norms > 0
+        normals[valid] /= norms[valid]
         return normals
 
 
 # ============================================================================
-# Dataset with X (images) and Y (mesh) pairs
+# UPDATED Dataset Class - Handles Subdirectories
 # ============================================================================
 
-class ShoeDataset(Dataset):
-    """Complete dataset with X (multi-view images) and Y (3D mesh)"""
-    
-    def __init__(self, obj_dir, images_dir, verify_mappings=True, image_size=512):
-        self.obj_converter = OBJToTrainingTarget(normalize=True)
+class MultiViewMeshDataset(Dataset):
+    """
+    UPDATED: Dataset that loads from subdirectories
+    - X: six-view rendered images
+    - Y: 3D mesh (vertices, faces, colors, normals)
+    """
+
+    def __init__(self, obj_dir, images_dir, views, image_size=512):
+        super().__init__()
+        self.obj_dir = Path(obj_dir)
         self.images_dir = Path(images_dir)
-        self.image_size = image_size  # Target image size (512x512 for DINOv2)
+        self.views = views
+        self.image_size = image_size
+        
+        # Create converter
+        self.obj_converter = OBJToTrainingTarget(normalize=True, max_vertices=10000)
+        
+        # Build mapping: now handles subdirectories
+        self.obj_paths, self.shoe_ids = self._scan_objs()
+        
+        # Verify X-Y mapping
+        self._verify_xy_mapping()
 
-        # Find all OBJs
-        self.obj_paths = list(Path(obj_dir).rglob("*.obj"))
+    def _scan_objs(self):
+        """
+        UPDATED: Scan OBJ directory including subdirectories
+        Looks for .obj files in:
+        1. Direct children: OBJs/shoe001.obj
+        2. Subdirectories: OBJs/shoe001/shoe001.obj
+        """
+        print("\nScanning OBJ directory (including subdirectories)...")
+        obj_paths = []
+        shoe_ids = []
+        
+        # Method 1: Check direct children
+        direct_objs = list(self.obj_dir.glob("*.obj"))
+        for path in direct_objs:
+            shoe_id = path.stem
+            obj_paths.append(path)
+            shoe_ids.append(shoe_id)
+        
+        # Method 2: Check subdirectories (shoe_id/shoe_id.obj pattern)
+        subdirs = [d for d in self.obj_dir.iterdir() if d.is_dir()]
+        for subdir in subdirs:
+            shoe_id = subdir.name
+            
+            # Look for .obj files in subdirectory
+            obj_files = list(subdir.glob("*.obj"))
+            
+            if len(obj_files) == 0:
+                continue  # No OBJ in this subdirectory
+            elif len(obj_files) == 1:
+                # Single OBJ file - use it
+                obj_paths.append(obj_files[0])
+                shoe_ids.append(shoe_id)
+            else:
+                # Multiple OBJ files - prefer one matching shoe_id
+                matching = [f for f in obj_files if f.stem == shoe_id]
+                if matching:
+                    obj_paths.append(matching[0])
+                    shoe_ids.append(shoe_id)
+                else:
+                    # Just use the first one
+                    obj_paths.append(obj_files[0])
+                    shoe_ids.append(shoe_id)
+                    print(f"  Warning: Multiple OBJs in {subdir.name}, using {obj_files[0].name}")
+        
+        # Sort for consistency
+        sorted_pairs = sorted(zip(shoe_ids, obj_paths))
+        shoe_ids = [pair[0] for pair in sorted_pairs]
+        obj_paths = [pair[1] for pair in sorted_pairs]
+        
+        print(f"  Found {len(obj_paths)} OBJ files")
+        if len(obj_paths) > 0:
+            print(f"  Example: {obj_paths[0]}")
+        
+        return obj_paths, shoe_ids
 
-        # Extract shoe IDs
-        self.shoe_ids = [self._extract_shoe_id(p) for p in self.obj_paths]
-
-        self.views = ['front', 'back', 'left', 'right', 'top', 'bottom']
-
-        # Verify X-Y mappings
-        if verify_mappings:
-            self._verify_all_mappings()
-    
-    def _extract_shoe_id(self, obj_path):
-        """Extract shoe ID from path"""
-        return obj_path.parent.name
-    
-    def _verify_all_mappings(self):
-        """Verify that all OBJs have corresponding images"""
-        print("\n" + "="*60)
-        print("VERIFYING X-Y MAPPINGS")
+    def _verify_xy_mapping(self):
+        """Ensure each OBJ has corresponding multi-view images"""
+        print("\nVerifying X-Y mappings (OBJ ↔ images)...")
         print("="*60)
         
         missing_images = []
@@ -220,33 +259,30 @@ class ShoeDataset(Dataset):
                     missing_views.append(view)
             
             if missing_views:
-                missing_images.append({
-                    'shoe_id': shoe_id,
-                    'obj_path': str(obj_path),
-                    'missing_views': missing_views
-                })
+                missing_images.append((shoe_id, missing_views))
             else:
                 valid_pairs += 1
         
-        print(f"\n✓ Valid X-Y pairs: {valid_pairs}/{len(self.obj_paths)}")
+        print(f"  Valid pairs:   {valid_pairs}")
+        print(f"  Missing pairs: {len(missing_images)}")
         
         if missing_images:
-            print(f"\n⚠️  WARNING: {len(missing_images)} shoes have missing images:")
-            for item in missing_images[:5]:
-                print(f"  Shoe ID: {item['shoe_id']}")
-                print(f"    OBJ: {item['obj_path']}")
-                print(f"    Missing views: {', '.join(item['missing_views'])}")
-            
+            print("\nMissing views per shoe:")
+            for shoe_id, views in missing_images[:5]:  # Show first 5
+                print(f"  {shoe_id}: missing {views}")
             if len(missing_images) > 5:
                 print(f"  ... and {len(missing_images) - 5} more")
             
-            print(f"\n🔧 Removing {len(missing_images)} invalid pairs from dataset")
-            valid_indices = [i for i in range(len(self.obj_paths)) 
-                           if self.shoe_ids[i] not in [m['shoe_id'] for m in missing_images]]
+            # Filter out invalid pairs
+            valid_indices = []
+            for i, (shoe_id, _) in enumerate(zip(self.shoe_ids, self.obj_paths)):
+                if not any(shoe_id == m_id for m_id, _ in missing_images):
+                    valid_indices.append(i)
+            
             self.obj_paths = [self.obj_paths[i] for i in valid_indices]
             self.shoe_ids = [self.shoe_ids[i] for i in valid_indices]
             
-            print(f"✓ Dataset cleaned: {len(self.obj_paths)} valid pairs remaining")
+            print(f"\n✓ Dataset cleaned: {len(self.obj_paths)} valid pairs remaining")
         else:
             print("✓ All X-Y mappings verified successfully!")
         
@@ -276,53 +312,41 @@ class ShoeDataset(Dataset):
             elif img_path_jpg.exists():
                 img_path = img_path_jpg
             else:
-                raise FileNotFoundError(
-                    f"Missing image for Shoe ID {shoe_id}, view {view}"
-                )
+                raise FileNotFoundError(f"No image found for {shoe_id} view {view}")
             
-            img = Image.open(img_path).convert('RGB')
-
-            # Resize to target size to avoid memory issues
-            img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
-
-            img = torch.from_numpy(np.array(img)).float() / 255.0
-            img = img.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
-            images[view] = img
-
-        return {
-            # X values (input)
+            img = Image.open(img_path).convert("RGB")
+            img = img.resize((self.image_size, self.image_size))
+            img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+            images[view] = img_tensor
+        
+        sample = {
             'images': images,
-
-            # Y values (target)
-            'vertices': y_values['vertices'],
-            'faces': y_values['faces'],
-            'vertex_colors': y_values['vertex_colors'],
-            'vertex_normals': y_values['vertex_normals'],
-            
-            # Metadata
+            'vertices': torch.from_numpy(y_values['vertices']),
+            'faces': torch.from_numpy(y_values['faces']),
+            'vertex_colors': torch.from_numpy(y_values['vertex_colors']),
+            'vertex_normals': torch.from_numpy(y_values['vertex_normals']),
             'shoe_id': shoe_id,
             'obj_path': str(obj_path)
         }
+        
+        return sample
 
 
 # ============================================================================
-# Custom Collate Function (for variable-sized meshes)
+# Collate Function (unchanged)
 # ============================================================================
 
-def custom_collate_fn(batch):
-    """Handle variable-sized meshes in batches"""
-    # Batch images (same size)
+def collate_fn(batch):
+    """Custom collate function to handle dictionaries"""
+    views = batch[0]['images'].keys()
     images_batch = {}
-    for view in ['front', 'back', 'left', 'right', 'top', 'bottom']:
-        images_batch[view] = torch.stack([item['images'][view] for item in batch])
-
-    # Meshes as lists (variable sizes)
+    for view in views:
+        images_batch[view] = torch.stack([item['images'][view] for item in batch], dim=0)
+    
     vertices_batch = [item['vertices'] for item in batch]
     faces_batch = [item['faces'] for item in batch]
     colors_batch = [item['vertex_colors'] for item in batch]
     normals_batch = [item['vertex_normals'] for item in batch]
-
-    # Metadata
     shoe_ids = [item['shoe_id'] for item in batch]
     obj_paths = [item['obj_path'] for item in batch]
 
@@ -335,3 +359,11 @@ def custom_collate_fn(batch):
         'shoe_id': shoe_ids,
         'obj_path': obj_paths
     }
+
+
+# ============================================================================
+# Aliases for backward compatibility
+# ============================================================================
+
+ShoeDataset = MultiViewMeshDataset
+custom_collate_fn = collate_fn

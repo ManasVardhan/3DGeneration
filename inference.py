@@ -35,31 +35,18 @@ class MeshGenerator:
             num_points=config.num_points,
             freeze_encoder=True
         ).to(self.device)
-
-        # Load checkpoint (handle both full checkpoint and weights-only formats)
-        geometry_state = torch.load(geometry_checkpoint, map_location=self.device)
-        if isinstance(geometry_state, dict) and 'model_state_dict' in geometry_state:
-            # Full checkpoint format (from training)
-            self.geometry_model.load_state_dict(geometry_state['model_state_dict'])
-        else:
-            # Weights-only format
-            self.geometry_model.load_state_dict(geometry_state)
-
+        
+        self.geometry_model.load_state_dict(
+            torch.load(geometry_checkpoint, map_location=self.device)
+        )
         self.geometry_model.eval()
         print("✓ Geometry model loaded")
         
         # Load texture model
         self.texture_model = VertexColorPredictor(device=self.device)
-
-        # Load checkpoint (handle both full checkpoint and weights-only formats)
-        texture_state = torch.load(texture_checkpoint, map_location=self.device)
-        if isinstance(texture_state, dict) and 'model_state_dict' in texture_state:
-            # Full checkpoint format (from training)
-            self.texture_model.load_state_dict(texture_state['model_state_dict'])
-        else:
-            # Weights-only format
-            self.texture_model.load_state_dict(texture_state)
-
+        self.texture_model.load_state_dict(
+            torch.load(texture_checkpoint, map_location=self.device)
+        )
         self.texture_model.eval()
         print("✓ Texture model loaded")
         

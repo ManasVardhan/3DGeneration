@@ -1,13 +1,10 @@
 """
-IMPROVED Training Script for Stage 1: Geometry Model
-VERIFIED - Uses real data, no dummy placeholders
-
-Key improvements:
-- Warmup learning rate schedule
-- Enhanced loss with 5 components
-- Normal prediction
-- Better logging
-- ACTUAL DATA LOADING (no dummy data)
+FIXED Training Script with Multi-Scale Supervision
+Key changes:
+1. Uses multi-scale model
+2. Progressive training strategy
+3. Much stronger regularization
+4. Proper mesh-based losses
 """
 
 import torch
@@ -17,40 +14,82 @@ from pathlib import Path
 import time
 from datetime import datetime
 import json
-import random
 
-# Import project modules
-from config import config
-from models.geometry_model import GeometryModel, geometry_loss
-from load_data import ShoeDataset, custom_collate_fn
+from geometry_model_fixed import ImprovedGeometryModel, multi_scale_geometry_loss
 
 
-class ImprovedGeometryTrainer:
-    """Improved Trainer for Stage 1: Geometry prediction"""
+class FixedConfig:
+    """Configuration with proper settings for mesh training"""
+    
+    # Data paths - UPDATE THESE
+    obj_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs"
+    images_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/input_images"
+    
+    checkpoint_dir = "checkpoints_fixed"
+    log_dir = "logs_fixed"
+    output_dir = "output_fixed"
+    
+    # Training
+    batch_size = 1
+    num_epochs = 150  # More epochs needed
+    
+    # CRITICAL: Much lower learning rate
+    learning_rate = 1e-5  # 10x lower!
+    weight_decay = 0.01
+    
+    # Loss weights - MUCH STRONGER REGULARIZATION
+    lambda_chamfer = 1.0
+    lambda_edge = 2.0      # 4x stronger
+    lambda_smooth = 1.0    # 5x stronger  
+    lambda_normal = 0.5
+    
+    # Settings
+    freeze_image_encoder = False
+    hidden_dim = 1024
+    image_size = 512
+    num_workers = 0
+    
+    # Device
+    device = "mps" if torch.backends.mps.is_available() else \
+             "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Logging
+    log_interval = 5
+    save_interval = 10
+    patience = 25
+    min_delta = 1e-5
+    
+    grad_clip_norm = 0.5  # Lower gradient clipping
+    seed = 42
+
+
+config = FixedConfig()
+torch.manual_seed(config.seed)
+
+
+class MultiScaleTrainer:
+    """Trainer for multi-scale geometry model"""
 
     def __init__(self, config):
         self.config = config
-
-        # Create directories
+        
         Path(config.checkpoint_dir).mkdir(exist_ok=True, parents=True)
         Path(config.log_dir).mkdir(exist_ok=True, parents=True)
 
         print("="*70)
-        print("STAGE 1: IMPROVED GEOMETRY MODEL TRAINING")
+        print("MULTI-SCALE MESH TRAINING")
         print("="*70)
         print(f"Device: {config.device}")
-        print(f"Batch Size: {config.batch_size_stage1}")
-        print(f"Learning Rate: {config.learning_rate_stage1}")
-        print(f"Epochs: {config.num_epochs_stage1}")
-        print(f"Point Cloud Size: {config.num_points}")
-        print(f"Freeze Encoder: {config.freeze_image_encoder}")
+        print(f"Learning Rate: {config.learning_rate} (VERY LOW - prevents fragmentation)")
+        print(f"Regularization:")
+        print(f"  Edge weight: {config.lambda_edge} (STRONG)")
+        print(f"  Smooth weight: {config.lambda_smooth} (STRONG)")
         print("="*70)
 
-        # Load dataset - REAL DATA
+        # Load dataset
+        from load_data import ShoeDataset, custom_collate_fn
+        
         print("\nLoading dataset...")
-        print(f"  OBJ directory: {config.obj_dir}")
-        print(f"  Images directory: {config.images_dir}")
-
         self.dataset = ShoeDataset(
             obj_dir=config.obj_dir,
             images_dir=config.images_dir,
@@ -59,153 +98,131 @@ class ImprovedGeometryTrainer:
         )
 
         if len(self.dataset) == 0:
-            raise ValueError(f"❌ No data found! Check paths:\n"
-                           f"   OBJ dir: {config.obj_dir}\n"
-                           f"   Images dir: {config.images_dir}")
+            raise ValueError(f"No data found!")
 
         self.dataloader = DataLoader(
             self.dataset,
-            batch_size=config.batch_size_stage1,
+            batch_size=config.batch_size,
             shuffle=True,
             num_workers=config.num_workers,
             collate_fn=custom_collate_fn
         )
 
-        print(f"✓ Dataset loaded: {len(self.dataset)} shoes")
-        print(f"✓ DataLoader created: {len(self.dataloader)} batches")
+        print(f"✓ Dataset: {len(self.dataset)} shoes")
 
-        # Initialize model
-        print("\nInitializing improved model...")
-        self.model = GeometryModel(
-            num_points=config.num_points,
+        # Initialize multi-scale model
+        print("\nInitializing multi-scale model...")
+        self.model = ImprovedGeometryModel(
             freeze_encoder=config.freeze_image_encoder,
             hidden_dim=config.hidden_dim
         ).to(config.device)
 
         total_params, trainable_params = self.model.count_parameters()
-        print(f"✓ Model initialized")
-        print(f"  Total parameters: {total_params:,}")
-        print(f"  Trainable parameters: {trainable_params:,}")
+        print(f"✓ Parameters: {total_params:,} total, {trainable_params:,} trainable")
 
-        # Optimizer
+        # Optimizer with very low LR
         self.optimizer = optim.AdamW(
             self.model.get_trainable_parameters(),
-            lr=config.learning_rate_stage1,
-            weight_decay=config.weight_decay_stage1
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+            betas=(0.9, 0.999)
         )
 
-        # Learning rate scheduler with warmup
-        self.warmup_epochs = 5
+        # Cosine annealing with warmup
+        self.warmup_epochs = 10
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=config.num_epochs_stage1 - self.warmup_epochs,
-            eta_min=1e-6
+            T_max=config.num_epochs - self.warmup_epochs,
+            eta_min=1e-7
         )
 
-        # Training state
         self.best_loss = float('inf')
         self.patience_counter = 0
         self.train_history = {
             'epoch': [],
             'loss': [],
-            'chamfer': [],
-            'normal': [],
-            'edge': [],
-            'smooth': [],
-            'coverage': [],
+            'chamfer_fine': [],
+            'edge_fine': [],
+            'smooth_fine': [],
             'lr': []
         }
 
-        print(f"\n✓ Trainer initialized")
-        print(f"  Warmup epochs: {self.warmup_epochs}")
-        print(f"  Scheduler: CosineAnnealingLR (min LR: 1e-6)")
-        print(f"  Early stopping patience: {config.patience}")
+        print(f"\n✓ Trainer ready")
+        print(f"  Warmup: {self.warmup_epochs} epochs")
+        print(f"  Grad clip: {config.grad_clip_norm}")
 
-    def _sample_points(self, vertices, num_samples):
-        """Randomly sample points from vertices"""
+    def _sample_points(self, vertices, num_samples=2562):
+        """Sample points from vertices"""
         num_verts = vertices.shape[0]
         if num_verts >= num_samples:
             indices = torch.randperm(num_verts, device=vertices.device)[:num_samples]
             return vertices[indices]
         else:
-            # If not enough vertices, repeat some
             indices = torch.randint(0, num_verts, (num_samples,), device=vertices.device)
             return vertices[indices]
 
-    def _shuffle_views(self, images_dict):
-        """Randomly shuffle the order of views for permutation invariance"""
-        view_names = ['front', 'back', 'left', 'right', 'top', 'bottom']
-        perm = list(range(6))
-        random.shuffle(perm)
-
-        shuffled_images = {}
-        stacked_images = torch.stack([images_dict[name] for name in view_names], dim=1)
-        shuffled_stacked = stacked_images[:, perm, :, :, :]
-
-        for i, name in enumerate(view_names):
-            shuffled_images[name] = shuffled_stacked[:, i, :, :, :]
-
-        return shuffled_images
-
     def train_epoch(self, epoch):
-        """Train for one epoch"""
+        """Train one epoch"""
         self.model.train()
         epoch_loss = 0
-        epoch_losses = {'chamfer': 0, 'normal': 0, 'edge': 0, 'smooth': 0, 'coverage': 0}
+        epoch_losses = {
+            'chamfer_coarse': 0, 'chamfer_mid': 0, 'chamfer_fine': 0,
+            'edge_fine': 0, 'smooth_fine': 0, 'normal_fine': 0
+        }
         num_batches = len(self.dataloader)
 
-        # Warmup learning rate
+        # Warmup LR
         if epoch < self.warmup_epochs:
             lr_scale = (epoch + 1) / self.warmup_epochs
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] = self.config.learning_rate_stage1 * lr_scale
+                param_group['lr'] = self.config.learning_rate * lr_scale
 
         for batch_idx, batch in enumerate(self.dataloader):
-            # Move to device
             images = {k: v.to(self.config.device) for k, v in batch['images'].items()}
 
-            # Randomly shuffle views
-            images = self._shuffle_views(images)
-
-            # Process each shoe in batch
             batch_loss = 0
-            batch_loss_dict = {'chamfer': 0, 'normal': 0, 'edge': 0, 'smooth': 0, 'coverage': 0}
+            batch_loss_dict = {k: 0 for k in epoch_losses.keys()}
 
             for i in range(len(batch['vertices'])):
                 gt_vertices = batch['vertices'][i].to(self.config.device)
                 images_single = {k: v[i:i+1] for k, v in images.items()}
 
-                # Forward pass - returns (points, normals)
-                pred_points, pred_normals = self.model(images_single)
+                # Forward: get all levels
+                mesh_outputs = self.model(images_single, return_all_levels=True)
 
-                # Sample GT vertices
-                gt_vertices_sample = self._sample_points(gt_vertices, self.config.num_points)
+                # Sample GT to match fine mesh size
+                gt_sample = self._sample_points(gt_vertices, num_samples=2562)
 
-                # Compute loss
-                loss, loss_dict = geometry_loss(
-                    pred_points[0],
-                    pred_normals[0],
-                    gt_vertices_sample,
+                # Multi-scale loss
+                loss, loss_dict = multi_scale_geometry_loss(
+                    mesh_outputs,
+                    gt_sample,
                     lambda_chamfer=self.config.lambda_chamfer,
-                    lambda_normal=self.config.lambda_normal,
                     lambda_edge=self.config.lambda_edge,
                     lambda_smooth=self.config.lambda_smooth,
-                    lambda_coverage=self.config.lambda_coverage
+                    lambda_normal=self.config.lambda_normal
                 )
 
                 batch_loss += loss
                 for key in batch_loss_dict.keys():
-                    batch_loss_dict[key] += loss_dict[key]
+                    if key in loss_dict:
+                        batch_loss_dict[key] += loss_dict[key]
 
             # Average over batch
             loss = batch_loss / len(batch['vertices'])
             for key in batch_loss_dict.keys():
                 batch_loss_dict[key] /= len(batch['vertices'])
 
-            # Backward pass
+            # Backward
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), 1.0)
+            
+            # Gradient clipping - CRITICAL
+            torch.nn.utils.clip_grad_norm_(
+                self.model.get_trainable_parameters(), 
+                self.config.grad_clip_norm
+            )
+            
             self.optimizer.step()
 
             epoch_loss += loss.item()
@@ -215,12 +232,13 @@ class ImprovedGeometryTrainer:
             # Logging
             if batch_idx % self.config.log_interval == 0:
                 progress = (batch_idx + 1) / num_batches * 100
-                print(f"  Epoch [{epoch+1}/{self.config.num_epochs_stage1}] "
+                print(f"  Epoch [{epoch+1}/{self.config.num_epochs}] "
                       f"Batch [{batch_idx+1}/{num_batches}] ({progress:.1f}%)")
-                print(f"    Total: {loss.item():.6f} | "
-                      f"Chamfer: {batch_loss_dict['chamfer']:.6f} | "
-                      f"Normal: {batch_loss_dict['normal']:.6f} | "
-                      f"Edge: {batch_loss_dict['edge']:.6f}")
+                print(f"    Loss: {loss.item():.6f}")
+                print(f"    Chamfer (C/M/F): {batch_loss_dict['chamfer_coarse']:.6f} / "
+                      f"{batch_loss_dict['chamfer_mid']:.6f} / {batch_loss_dict['chamfer_fine']:.6f}")
+                print(f"    Edge: {batch_loss_dict['edge_fine']:.6f} | "
+                      f"Smooth: {batch_loss_dict['smooth_fine']:.6f}")
 
         avg_loss = epoch_loss / num_batches
         avg_losses = {k: v / num_batches for k, v in epoch_losses.items()}
@@ -230,47 +248,42 @@ class ImprovedGeometryTrainer:
     def train(self):
         """Main training loop"""
         print("\n" + "="*70)
-        print("STARTING IMPROVED TRAINING")
+        print("STARTING MULTI-SCALE TRAINING")
         print("="*70)
 
         start_time = time.time()
 
-        for epoch in range(self.config.num_epochs_stage1):
+        for epoch in range(self.config.num_epochs):
             epoch_start = time.time()
 
-            # Train one epoch
             avg_loss, avg_losses = self.train_epoch(epoch)
 
-            # Step scheduler after warmup
             if epoch >= self.warmup_epochs:
                 self.scheduler.step()
 
-            # Epoch summary
             epoch_time = time.time() - epoch_start
             current_lr = self.optimizer.param_groups[0]['lr']
 
             print(f"\n{'─'*70}")
-            print(f"Epoch {epoch+1}/{self.config.num_epochs_stage1} Summary:")
-            print(f"  Total Loss:    {avg_loss:.6f}")
-            print(f"  Chamfer:       {avg_losses['chamfer']:.6f}")
-            print(f"  Normal:        {avg_losses['normal']:.6f}")
-            print(f"  Edge:          {avg_losses['edge']:.6f}")
-            print(f"  Smooth:        {avg_losses['smooth']:.6f}")
-            print(f"  Coverage:      {avg_losses['coverage']:.6f}")
-            print(f"  Time:          {epoch_time:.2f}s")
-            print(f"  Learning Rate: {current_lr:.2e}")
+            print(f"Epoch {epoch+1} Summary:")
+            print(f"  Total Loss: {avg_loss:.6f}")
+            print(f"  Chamfer Fine: {avg_losses['chamfer_fine']:.6f}")
+            print(f"  Edge Fine: {avg_losses['edge_fine']:.6f}")
+            print(f"  Smooth Fine: {avg_losses['smooth_fine']:.6f}")
+            print(f"  Time: {epoch_time:.1f}s | LR: {current_lr:.2e}")
             print(f"{'─'*70}\n")
 
             # Save history
             self.train_history['epoch'].append(epoch + 1)
             self.train_history['loss'].append(avg_loss)
             self.train_history['lr'].append(current_lr)
-            for key in avg_losses.keys():
-                self.train_history[key].append(avg_losses[key])
+            self.train_history['chamfer_fine'].append(avg_losses['chamfer_fine'])
+            self.train_history['edge_fine'].append(avg_losses['edge_fine'])
+            self.train_history['smooth_fine'].append(avg_losses['smooth_fine'])
 
-            # Save checkpoint
+            # Checkpointing
             if (epoch + 1) % self.config.save_interval == 0:
-                checkpoint_path = Path(self.config.checkpoint_dir) / f"geometry_improved_epoch{epoch+1}.pth"
+                checkpoint_path = Path(self.config.checkpoint_dir) / f"multiscale_epoch{epoch+1}.pth"
                 torch.save({
                     'epoch': epoch + 1,
                     'model_state_dict': self.model.state_dict(),
@@ -278,112 +291,72 @@ class ImprovedGeometryTrainer:
                     'loss': avg_loss,
                     'history': self.train_history
                 }, checkpoint_path)
-
-                # Save training history at each checkpoint
-                history_path = Path(self.config.log_dir) / "geometry_improved_training_history.json"
-                with open(history_path, 'w') as f:
-                    json.dump(self.train_history, f, indent=2)
-
-                print(f"✓ Checkpoint saved: {checkpoint_path}")
-                print(f"✓ Training history saved: {history_path}\n")
+                print(f"✓ Checkpoint: {checkpoint_path}\n")
 
             # Early stopping
             if avg_loss < self.best_loss - self.config.min_delta:
                 self.best_loss = avg_loss
                 self.patience_counter = 0
 
-                best_path = Path(self.config.checkpoint_dir) / "geometry_improved_best.pth"
+                best_path = Path(self.config.checkpoint_dir) / "multiscale_best.pth"
                 torch.save(self.model.state_dict(), best_path)
-
-                # Save training history when best model is saved
-                history_path = Path(self.config.log_dir) / "geometry_improved_training_history.json"
-                with open(history_path, 'w') as f:
-                    json.dump(self.train_history, f, indent=2)
-
-                print(f"✓ Best model saved: {best_path} (Loss: {avg_loss:.6f})")
-                print(f"✓ Training history saved: {history_path}\n")
+                print(f"✓ Best model: {best_path} (Loss: {avg_loss:.6f})\n")
             else:
                 self.patience_counter += 1
-                print(f"⚠️  No improvement for {self.patience_counter} epochs\n")
-
                 if self.patience_counter >= self.config.patience:
-                    print(f"Early stopping triggered at epoch {epoch+1}")
+                    print(f"Early stopping at epoch {epoch+1}")
                     break
 
-        # Training complete
         total_time = time.time() - start_time
-        hours = int(total_time // 3600)
-        minutes = int((total_time % 3600) // 60)
+        hours, minutes = int(total_time // 3600), int((total_time % 3600) // 60)
 
         print("\n" + "="*70)
-        print("IMPROVED STAGE 1 TRAINING COMPLETE")
+        print("TRAINING COMPLETE")
         print("="*70)
-        print(f"Total time: {hours}h {minutes}m")
+        print(f"Time: {hours}h {minutes}m")
         print(f"Best loss: {self.best_loss:.6f}")
-        print(f"Final model: {self.config.checkpoint_dir}/geometry_improved_best.pth")
         print("="*70)
 
-        # Save training history
-        history_path = Path(self.config.log_dir) / "geometry_improved_training_history.json"
+        # Save history
+        history_path = Path(self.config.log_dir) / "training_history.json"
         with open(history_path, 'w') as f:
             json.dump(self.train_history, f, indent=2)
-        print(f"\n✓ Training history saved: {history_path}")
+        print(f"\n✓ History: {history_path}")
 
         return self.model
 
 
 def main():
-    """Main training script"""
+    """Main entry point"""
     print("\n" + "="*70)
-    print("IMPROVED MULTI-VIEW TO 3D MESH - STAGE 1: GEOMETRY")
+    print("FIXED MULTI-SCALE MESH TRAINING")
     print("="*70)
-    print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*70)
-
-    # Verify data paths exist
-    print("\nVerifying data paths...")
-    obj_path = Path(config.obj_dir)
-    img_path = Path(config.images_dir)
-
-    if not obj_path.exists():
-        print(f"❌ ERROR: OBJ directory not found: {config.obj_dir}")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Verify paths
+    if not Path(config.obj_dir).exists():
+        print(f"✗ OBJ dir not found: {config.obj_dir}")
         return
-    if not img_path.exists():
-        print(f"❌ ERROR: Images directory not found: {config.images_dir}")
+    if not Path(config.images_dir).exists():
+        print(f"✗ Images dir not found: {config.images_dir}")
         return
-
-    print(f"✓ OBJ directory exists: {config.obj_dir}")
-    print(f"✓ Images directory exists: {config.images_dir}")
-
-    # Print configuration
+    
     print("\nConfiguration:")
-    print(f"  Learning Rate: {config.learning_rate_stage1}")
-    print(f"  Epochs: {config.num_epochs_stage1}")
-    print(f"  Points: {config.num_points}")
-    print(f"  Batch Size: {config.batch_size_stage1}")
-    print(f"  Loss weights:")
-    print(f"    - Chamfer:  {config.lambda_chamfer}")
-    print(f"    - Normal:   {config.lambda_normal}")
-    print(f"    - Edge:     {config.lambda_edge}")
-    print(f"    - Smooth:   {config.lambda_smooth}")
-    print(f"    - Coverage: {config.lambda_coverage}")
+    print(f"  LR: {config.learning_rate} (VERY LOW)")
+    print(f"  Edge regularization: {config.lambda_edge} (STRONG)")
+    print(f"  Smooth regularization: {config.lambda_smooth} (STRONG)")
+    print(f"  Grad clip: {config.grad_clip_norm}")
 
-    # Initialize trainer
-    print("\n" + "="*70)
-    trainer = ImprovedGeometryTrainer(config)
-
-    # Train
+    trainer = MultiScaleTrainer(config)
     model = trainer.train()
 
-    print(f"\nEnd Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("\n✅ Improved Stage 1 Complete!")
-    print("\nKey improvements applied:")
-    print("  • Poisson reconstruction (not convex hull)")
-    print("  • Normal prediction for surface orientation")
-    print("  • 5-component enhanced loss function")
-    print("  • Higher learning rate with warmup")
-    print("  • Enhanced point cloud detail")
-    print("\nReady for Stage 2 (Texture Training)")
+    print(f"\n✅ Training complete!")
+    print("\nKey fixes applied:")
+    print("  • Multi-scale progressive refinement (coarse→mid→fine)")
+    print("  • Mesh-aware losses using actual connectivity")
+    print("  • Much stronger regularization (2-5x)")
+    print("  • Very low learning rate (1e-5)")
+    print("  • Bounded deformations at each scale")
 
 
 if __name__ == "__main__":

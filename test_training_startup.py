@@ -1,342 +1,478 @@
 """
-Smoke Test for CURRENT Point Cloud Training Pipeline
-Tests the actual geometry model and training you're using
+UPDATED Smoke Test - Compatible with Your load_data.py
+Handles both ShoeDataset and MultiViewMeshDataset naming
 """
 
-import torch
 import sys
 import traceback
 from pathlib import Path
 import warnings
-warnings.filterwarnings('ignore')
 
+import torch
+from torch.utils.data import DataLoader
+import torch.optim as optim
+
+warnings.filterwarnings("ignore")
+
+
+# ---------------------------------------------------------------------------
+# 1. Import tests
+# ---------------------------------------------------------------------------
 
 def test_imports():
-    """Test: All imports work"""
-    print("="*70)
-    print("TEST 1: IMPORTS")
-    print("="*70)
-
+    print("=" * 70)
+    print("TEST 1: Imports")
+    print("=" * 70)
     try:
-        print("  PyTorch...", end=" ")
-        import torch
-        print(f"✓ (v{torch.__version__})")
-
-        print("  Transformers...", end=" ")
-        from transformers import AutoModel
-        print("✓")
-
-        print("  Trimesh...", end=" ")
-        import trimesh
-        print("✓")
-
-        print("  Project modules...", end=" ")
         from config import config
-        from models.geometry_model import GeometryModel, geometry_loss
-        from train_geometry import ImprovedGeometryTrainer
-        print("✓")
-
-        print("\n✓ All imports successful\n")
-        return True
-
+        
+        # Try both naming conventions
+        try:
+            from load_data import ShoeDataset, custom_collate_fn
+            dataset_class = ShoeDataset
+            collate = custom_collate_fn
+            print("  ✓ config imported")
+            print("  ✓ ShoeDataset & custom_collate_fn imported")
+        except ImportError:
+            # Fall back to alternate names
+            from load_data import MultiViewMeshDataset, collate_fn
+            dataset_class = MultiViewMeshDataset
+            collate = collate_fn
+            print("  ✓ config imported")
+            print("  ✓ MultiViewMeshDataset & collate_fn imported")
+            print("  ℹ️  Using alternate names (add aliases to load_data.py)")
+        
+        # Try to import the model
+        try:
+            from models.geometry_model import ImprovedGeometryModel, multi_scale_geometry_loss
+            print("  ✓ ImprovedGeometryModel & multi_scale_geometry_loss imported")
+            print("  ✓ Using NEW multi-scale architecture")
+            is_new = True
+        except ImportError:
+            from models.geometry_model import GeometryModel, geometry_loss
+            print("  ✓ GeometryModel & geometry_loss imported")
+            print("  ⚠️  Using OLD single-scale architecture (will fragment!)")
+            is_new = False
+            
+        print()
+        return True, is_new, dataset_class, collate
+            
     except Exception as e:
-        print(f"\n✗ Import failed: {e}\n")
+        print(f"  ✗ Import failed: {e}")
         traceback.print_exc()
-        return False
+        print()
+        return False, False, None, None
 
+
+# ---------------------------------------------------------------------------
+# 2. Config sanity check
+# ---------------------------------------------------------------------------
 
 def test_config():
-    """Test: Config loads correctly"""
-    print("="*70)
-    print("TEST 2: CONFIGURATION")
-    print("="*70)
-
+    print("=" * 70)
+    print("TEST 2: Config Sanity Check")
+    print("=" * 70)
     try:
         from config import config
 
         print(f"  Device: {config.device}")
-        print(f"  Batch size: {config.batch_size_stage1}")
-        print(f"  Num points: {config.num_points}")
-        print(f"  Learning rate: {config.learning_rate_stage1}")
-        print(f"  Epochs: {config.num_epochs_stage1}")
+        print(f"  OBJ dir:    {config.obj_dir}")
+        print(f"  Images dir: {config.images_dir}")
+        print(f"  Batch size (stage1): {config.batch_size_stage1}")
+        print(f"  Num points:          {getattr(config, 'num_points', 'N/A')}")
+        print(f"  LR stage1:           {config.learning_rate_stage1}")
+        
+        # Check for critical anti-fragmentation settings
+        print(f"\n  Anti-fragmentation settings:")
+        print(f"    Edge regularization:   {config.lambda_edge}")
+        print(f"    Smooth regularization: {config.lambda_smooth}")
+        print(f"    Gradient clipping:     {getattr(config, 'grad_clip_norm', 'NOT SET')}")
+        
+        # Validate settings
+        warnings = []
+        if config.learning_rate_stage1 > 5e-5:
+            warnings.append(f"LR too high ({config.learning_rate_stage1}) - should be ≤1e-5")
+        else:
+            print(f"  ✓ Learning rate is appropriately low")
+            
+        if config.lambda_edge < 1.0:
+            warnings.append(f"Edge regularization weak ({config.lambda_edge}) - should be ≥2.0")
+        else:
+            print(f"  ✓ Edge regularization is strong")
+            
+        if config.lambda_smooth < 0.5:
+            warnings.append(f"Smooth regularization weak ({config.lambda_smooth}) - should be ≥1.0")
+        else:
+            print(f"  ✓ Smooth regularization is strong")
 
-        # Check data paths
+        if warnings:
+            print(f"\n  ⚠️  CONFIG WARNINGS:")
+            for w in warnings:
+                print(f"    - {w}")
+
         obj_dir = Path(config.obj_dir)
         images_dir = Path(config.images_dir)
 
-        print(f"\n  Data paths:")
-        print(f"    OBJ dir: {obj_dir} ({'exists' if obj_dir.exists() else 'NOT FOUND'})")
-        print(f"    Images dir: {images_dir} ({'exists' if images_dir.exists() else 'NOT FOUND'})")
+        print("\n  Path existence:")
+        print(f"    OBJ dir exists?    {obj_dir.exists()}")
+        print(f"    Images dir exists? {images_dir.exists()}")
 
-        print("\n✓ Configuration OK\n")
+        print("\n  ✓ Config object looks OK\n")
         return True
-
     except Exception as e:
-        print(f"\n✗ Config failed: {e}\n")
+        print(f"  ✗ Config test failed: {e}")
         traceback.print_exc()
+        print()
         return False
 
 
-def test_geometry_model():
-    """Test: Geometry model initializes and runs"""
-    print("="*70)
-    print("TEST 3: GEOMETRY MODEL")
-    print("="*70)
+# ---------------------------------------------------------------------------
+# 3. Dataset + DataLoader test
+# ---------------------------------------------------------------------------
 
+def test_dataset_and_loader(dataset_class, collate):
+    print("=" * 70)
+    print("TEST 3: Dataset & DataLoader")
+    print("=" * 70)
     try:
         from config import config
-        from models.geometry_model import GeometryModel
 
-        print(f"  Initializing model...")
-        model = GeometryModel(
-            num_points=config.num_points,
-            freeze_encoder=True,
-            hidden_dim=config.hidden_dim
-        ).to(config.device)
-
-        total_params, trainable_params = model.count_parameters()
-        print(f"  ✓ Model created")
-        print(f"    Total params: {total_params:,}")
-        print(f"    Trainable: {trainable_params:,}")
-        print(f"    Points: {config.num_points}")
-
-        # Test forward pass
-        print(f"\n  Testing forward pass...")
-        model.eval()
-
-        views = ['front', 'back', 'left', 'right', 'top', 'bottom']
-        images = {
-            view: torch.randn(1, 3, 224, 224).to(config.device)
-            for view in views
+        # Prepare kwargs for dataset initialization
+        dataset_kwargs = {
+            'obj_dir': config.obj_dir,
+            'images_dir': config.images_dir,
+            'image_size': config.image_size,
         }
+        
+        # Add views if dataset expects it
+        if hasattr(config, 'views'):
+            dataset_kwargs['views'] = config.views
+        else:
+            # Assume standard views
+            dataset_kwargs['views'] = ['front', 'back', 'left', 'right', 'top', 'bottom']
 
-        with torch.no_grad():
-            points, normals = model(images)
+        dataset = dataset_class(**dataset_kwargs)
 
-        print(f"  ✓ Forward pass successful")
-        print(f"    Points shape: {points.shape}")
-        print(f"    Normals shape: {normals.shape}")
-        print(f"    Points range: [{points.min().item():.3f}, {points.max().item():.3f}]")
+        print(f"  Dataset size: {len(dataset)}")
 
-        print("\n✓ Geometry model working\n")
+        if len(dataset) == 0:
+            print("  ⚠️  Dataset is EMPTY – check your paths.")
+            return False
+
+        loader = DataLoader(
+            dataset,
+            batch_size=config.batch_size_stage1,
+            shuffle=True,
+            num_workers=config.num_workers,
+            collate_fn=collate,
+        )
+
+        batch = next(iter(loader))
+
+        print("  Batch keys:", list(batch.keys()))
+        print("  Views:", list(batch["images"].keys()))
+        for view, imgs in batch["images"].items():
+            print(f"    {view}: {tuple(imgs.shape)}  (B, C, H, W)")
+
+        print(f"  First sample vertices: {batch['vertices'][0].shape}")
+        print("  ✓ Dataset & loader work\n")
         return True
-
+    except StopIteration:
+        print("  ✗ DataLoader returned no batches (empty dataset).")
+        print()
+        return False
     except Exception as e:
-        print(f"\n✗ Geometry model failed: {e}\n")
+        print(f"  ✗ Dataset/DataLoader test failed: {e}")
         traceback.print_exc()
+        print()
         return False
 
 
-def test_loss_function():
-    """Test: Loss function computes correctly"""
-    print("="*70)
-    print("TEST 4: LOSS FUNCTION")
-    print("="*70)
+# ---------------------------------------------------------------------------
+# 4. Model forward pass
+# ---------------------------------------------------------------------------
 
+def test_model_forward(is_new_architecture, dataset_class, collate):
+    print("=" * 70)
+    print("TEST 4: Model Forward Pass")
+    print("=" * 70)
     try:
         from config import config
-        from models.geometry_model import geometry_loss
 
-        print(f"  Creating dummy data...")
-        pred_points = torch.randn(8192, 3).to(config.device)
-        pred_normals = torch.randn(8192, 3).to(config.device)
-        gt_points = torch.randn(8192, 3).to(config.device)
+        device = torch.device(config.device)
 
-        print(f"  Computing loss...")
-        loss, loss_dict = geometry_loss(
-            pred_points,
-            pred_normals,
-            gt_points,
-            lambda_chamfer=config.lambda_chamfer,
-            lambda_normal=config.lambda_normal,
-            lambda_edge=config.lambda_edge,
-            lambda_smooth=config.lambda_smooth,
-            lambda_coverage=config.lambda_coverage
-        )
-
-        print(f"  ✓ Loss computed")
-        print(f"    Total loss: {loss.item():.6f}")
-        print(f"    Components:")
-        for key, value in loss_dict.items():
-            print(f"      {key}: {value:.6f}")
-
-        print("\n✓ Loss function working\n")
-        return True
-
-    except Exception as e:
-        print(f"\n✗ Loss function failed: {e}\n")
-        traceback.print_exc()
-        return False
-
-
-def test_training_step():
-    """Test: Training step executes"""
-    print("="*70)
-    print("TEST 5: TRAINING STEP")
-    print("="*70)
-
-    try:
-        from config import config
-        from models.geometry_model import GeometryModel, geometry_loss
-        import torch.optim as optim
-
-        print(f"  Creating model...")
-        model = GeometryModel(
-            num_points=2048,  # Smaller for quick test
-            freeze_encoder=True,
-            hidden_dim=512
-        ).to(config.device)
-        model.train()
-
-        print(f"  Creating optimizer...")
-        optimizer = optim.AdamW(
-            model.get_trainable_parameters(),
-            lr=config.learning_rate_stage1
-        )
-
-        print(f"  Creating batch...")
-        views = ['front', 'back', 'left', 'right', 'top', 'bottom']
-        images = {
-            view: torch.randn(1, 3, 224, 224).to(config.device)
-            for view in views
+        # Prepare dataset
+        dataset_kwargs = {
+            'obj_dir': config.obj_dir,
+            'images_dir': config.images_dir,
+            'image_size': config.image_size,
         }
-        gt_vertices = torch.randn(2048, 3).to(config.device)
+        
+        if hasattr(config, 'views'):
+            dataset_kwargs['views'] = config.views
+        else:
+            dataset_kwargs['views'] = ['front', 'back', 'left', 'right', 'top', 'bottom']
 
-        print(f"  Running training step...")
+        dataset = dataset_class(**dataset_kwargs)
+        
+        if len(dataset) == 0:
+            print("  ✗ Cannot run forward pass: dataset is empty.")
+            return False
 
-        # Forward
-        pred_points, pred_normals = model(images)
-
-        # Loss
-        loss, loss_dict = geometry_loss(
-            pred_points[0],
-            pred_normals[0],
-            gt_vertices,
-            lambda_chamfer=config.lambda_chamfer,
-            lambda_normal=config.lambda_normal,
-            lambda_edge=config.lambda_edge,
-            lambda_smooth=config.lambda_smooth,
-            lambda_coverage=config.lambda_coverage
+        loader = DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=True,
+            num_workers=config.num_workers,
+            collate_fn=collate,
         )
+        batch = next(iter(loader))
 
-        print(f"    Loss: {loss.item():.6f}")
+        # Move images to device
+        images = {k: v.to(device) for k, v in batch["images"].items()}
+
+        if is_new_architecture:
+            # New multi-scale model
+            from models.geometry_model import ImprovedGeometryModel
+            
+            model = ImprovedGeometryModel(
+                freeze_encoder=config.freeze_image_encoder,
+                hidden_dim=config.hidden_dim,
+            ).to(device)
+            model.eval()
+
+            with torch.no_grad():
+                pred_points, pred_normals = model(images, return_all_levels=False)
+                print(f"  pred_points (fine) shape: {tuple(pred_points.shape)}   (B, N, 3)")
+                print(f"  pred_normals shape: {tuple(pred_normals.shape)} (B, N, 3)")
+                
+                # Test multi-level
+                mesh_outputs = model(images, return_all_levels=True)
+                print(f"\n  Multi-scale outputs:")
+                print(f"    Coarse: {tuple(mesh_outputs['coarse'].shape)} vertices")
+                print(f"    Mid:    {tuple(mesh_outputs['mid'].shape)} vertices")
+                print(f"    Fine:   {tuple(mesh_outputs['fine'].shape)} vertices")
+                
+        else:
+            # Old single-scale model
+            from models.geometry_model import GeometryModel
+            
+            model = GeometryModel(
+                num_points=config.num_points,
+                freeze_encoder=config.freeze_image_encoder,
+                hidden_dim=config.hidden_dim,
+            ).to(device)
+            model.eval()
+
+            with torch.no_grad():
+                pred_points, pred_normals = model(images)
+                print(f"  pred_points shape: {tuple(pred_points.shape)}   (B, N, 3)")
+                print(f"  pred_normals shape: {tuple(pred_normals.shape)} (B, N, 3)")
+
+        print("  ✓ Forward pass succeeded\n")
+        return True
+    except Exception as e:
+        print(f"  ✗ Model forward test failed: {e}")
+        traceback.print_exc()
+        print()
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 5. Single training step
+# ---------------------------------------------------------------------------
+
+def test_training_step(is_new_architecture, dataset_class, collate):
+    print("=" * 70)
+    print("TEST 5: Single Training Step")
+    print("=" * 70)
+    try:
+        from config import config
+
+        device = torch.device(config.device)
+
+        # Prepare dataset
+        dataset_kwargs = {
+            'obj_dir': config.obj_dir,
+            'images_dir': config.images_dir,
+            'image_size': config.image_size,
+        }
+        
+        if hasattr(config, 'views'):
+            dataset_kwargs['views'] = config.views
+        else:
+            dataset_kwargs['views'] = ['front', 'back', 'left', 'right', 'top', 'bottom']
+
+        dataset = dataset_class(**dataset_kwargs)
+        
+        if len(dataset) == 0:
+            print("  ✗ Cannot run training step: dataset is empty.")
+            return False
+
+        loader = DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=True,
+            num_workers=config.num_workers,
+            collate_fn=collate,
+        )
+        batch = next(iter(loader))
+
+        images = {k: v.to(device) for k, v in batch["images"].items()}
+        gt_vertices = batch["vertices"][0].to(device)
+
+        if is_new_architecture:
+            from models.geometry_model import ImprovedGeometryModel, multi_scale_geometry_loss
+            
+            model = ImprovedGeometryModel(
+                freeze_encoder=config.freeze_image_encoder,
+                hidden_dim=config.hidden_dim,
+            ).to(device)
+            model.train()
+
+            optimizer = optim.AdamW(
+                model.get_trainable_parameters(),
+                lr=config.learning_rate_stage1,
+                weight_decay=config.weight_decay_stage1,
+            )
+
+            mesh_outputs = model(images, return_all_levels=True)
+
+            if gt_vertices.shape[0] > 2562:
+                idx = torch.randperm(gt_vertices.shape[0], device=device)[:2562]
+                gt_sample = gt_vertices[idx]
+            else:
+                idx = torch.randint(0, gt_vertices.shape[0], (2562,), device=device)
+                gt_sample = gt_vertices[idx]
+
+            loss, loss_dict = multi_scale_geometry_loss(
+                mesh_outputs,
+                gt_sample,
+                lambda_chamfer=config.lambda_chamfer,
+                lambda_edge=config.lambda_edge,
+                lambda_smooth=config.lambda_smooth,
+                lambda_normal=config.lambda_normal,
+            )
+
+            print(f"  Loss value: {loss.item():.6f}")
+            print(f"    Components:")
+            for k, v in loss_dict.items():
+                print(f"      {k}: {v:.6f}")
+                
+        else:
+            from models.geometry_model import GeometryModel, geometry_loss
+            
+            model = GeometryModel(
+                num_points=config.num_points,
+                freeze_encoder=config.freeze_image_encoder,
+                hidden_dim=config.hidden_dim,
+            ).to(device)
+            model.train()
+
+            optimizer = optim.AdamW(
+                model.get_trainable_parameters(),
+                lr=config.learning_rate_stage1,
+                weight_decay=config.weight_decay_stage1,
+            )
+
+            pred_points, pred_normals = model(images)
+
+            if gt_vertices.shape[0] > config.num_points:
+                idx = torch.randperm(gt_vertices.shape[0], device=device)[:config.num_points]
+                gt_sample = gt_vertices[idx]
+            else:
+                gt_sample = gt_vertices
+
+            loss, loss_dict = geometry_loss(
+                pred_points[0],
+                pred_normals[0],
+                gt_sample,
+                lambda_chamfer=config.lambda_chamfer,
+                lambda_normal=config.lambda_normal,
+                lambda_edge=config.lambda_edge,
+                lambda_smooth=config.lambda_smooth,
+                lambda_coverage=getattr(config, 'lambda_coverage', 0.1),
+            )
+
+            print(f"  Loss value: {loss.item():.6f}")
+            print(f"    Components: {loss_dict}")
 
         # Backward
         optimizer.zero_grad()
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.get_trainable_parameters(), 1.0)
-        print(f"    Grad norm: {grad_norm:.4f}")
-
-        # Step
+        
+        grad_clip = getattr(config, "grad_clip_norm", None)
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(
+                model.get_trainable_parameters(), grad_clip
+            )
+            print(f"  ✓ Gradients clipped at {grad_clip}")
+            
         optimizer.step()
 
-        print("\n✓ Training step successful\n")
+        print("  ✓ Backward + optimizer step succeeded\n")
         return True
-
     except Exception as e:
-        print(f"\n✗ Training step failed: {e}\n")
+        print(f"  ✗ Training step test failed: {e}")
         traceback.print_exc()
+        print()
         return False
 
 
-def test_dataset():
-    """Test: Dataset loads (if data exists)"""
-    print("="*70)
-    print("TEST 6: DATASET")
-    print("="*70)
-
-    try:
-        from config import config
-        from load_data import ShoeDataset
-        from pathlib import Path
-
-        obj_dir = Path(config.obj_dir)
-        images_dir = Path(config.images_dir)
-
-        if not obj_dir.exists() or not images_dir.exists():
-            print("  ⚠️  Skipping: Data directories not found")
-            return True  # Don't fail
-
-        print(f"  Loading dataset...")
-        dataset = ShoeDataset(
-            obj_dir=config.obj_dir,
-            images_dir=config.images_dir,
-            verify_mappings=True,
-            image_size=config.image_size
-        )
-
-        print(f"  ✓ Dataset loaded")
-        print(f"    Size: {len(dataset)} shoes")
-
-        if len(dataset) > 0:
-            print(f"\n  Testing sample...")
-            sample = dataset[0]
-            print(f"    Shoe ID: {sample['shoe_id']}")
-            print(f"    Vertices: {sample['vertices'].shape}")
-            print(f"    Faces: {sample['faces'].shape}")
-            print(f"    Images: {list(sample['images'].keys())}")
-
-        print("\n✓ Dataset working\n")
-        return True
-
-    except Exception as e:
-        print(f"\n✗ Dataset failed: {e}\n")
-        traceback.print_exc()
-        return False
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    """Run all tests"""
-    print("\n" + "#"*70)
-    print("# CURRENT TRAINING PIPELINE SMOKE TEST")
-    print("# Point Cloud Geometry Model")
-    print("#"*70 + "\n")
+    print("\n" + "=" * 70)
+    print("MULTI-SCALE MESH TRAINING - SMOKE TEST")
+    print("=" * 70 + "\n")
+    
+    # Test imports
+    import_success, is_new_arch, dataset_class, collate = test_imports()
+    if not import_success:
+        print("\n❌ CRITICAL: Import test failed.")
+        print("\n🔧 POSSIBLE FIX:")
+        print("  Add these lines to the END of your load_data.py:")
+        print("    ShoeDataset = MultiViewMeshDataset")
+        print("    custom_collate_fn = collate_fn")
+        return 1
+    
+    print()
+    
+    results = {
+        "imports": import_success,
+        "config": test_config(),
+        "dataset": test_dataset_and_loader(dataset_class, collate),
+        "forward": test_model_forward(is_new_arch, dataset_class, collate),
+        "train_step": test_training_step(is_new_arch, dataset_class, collate),
+    }
 
-    tests = [
-        ("Imports", test_imports),
-        ("Configuration", test_config),
-        ("Geometry Model", test_geometry_model),
-        ("Loss Function", test_loss_function),
-        ("Training Step", test_training_step),
-        ("Dataset", test_dataset),
-    ]
-
-    results = {}
-    for test_name, test_func in tests:
-        try:
-            results[test_name] = test_func()
-        except Exception as e:
-            print(f"\n✗ {test_name} crashed: {e}\n")
-            traceback.print_exc()
-            results[test_name] = False
-
-    # Summary
-    print("="*70)
-    print("SUMMARY")
-    print("="*70)
-
+    print("=" * 70)
+    print("SMOKE TEST SUMMARY")
+    print("=" * 70)
     for test_name, passed in results.items():
         status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"  {status:8} {test_name}")
-
-    total = len(results)
-    passed = sum(results.values())
-    failed = total - passed
-
-    print(f"\n  Total: {total} tests")
-    print(f"  Passed: {passed}")
-    print(f"  Failed: {failed}")
-
+        print(f"  {test_name:20s}: {status}")
+    print("=" * 70)
+    
     if all(results.values()):
-        print("\n🎉 ALL TESTS PASSED! Ready to train!")
-        print("="*70 + "\n")
+        print("\n🎉 ALL TESTS PASSED!")
+        print("✓ Pipeline is correctly configured")
+        print("✓ Ready for training")
+        if is_new_arch:
+            print("✓ Using multi-scale architecture (fragmentation fix active)")
+        else:
+            print("⚠️  Using old architecture - WILL FRAGMENT!")
+            print("   Replace models/geometry_model.py with geometry_model_fixed.py")
+        print("\nRun: python train_geometry.py")
+        print("=" * 70)
         return 0
     else:
-        print("\n⚠️  SOME TESTS FAILED")
-        print("="*70 + "\n")
+        print("\n⚠️  SOME TESTS FAILED - see output above")
+        print("=" * 70)
         return 1
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    sys.exit(main())
