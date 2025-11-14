@@ -1,10 +1,6 @@
 """
-FIXED Training Script with Multi-Scale Supervision
-Key changes:
-1. Uses multi-scale model
-2. Progressive training strategy
-3. Much stronger regularization
-4. Proper mesh-based losses
+Multi-Scale Mesh Training Script
+Imports all settings from config.py
 """
 
 import torch
@@ -16,55 +12,7 @@ from datetime import datetime
 import json
 
 from models.geometry_model import ImprovedGeometryModel, multi_scale_geometry_loss
-
-
-class FixedConfig:
-    """Configuration with proper settings for mesh training"""
-    
-    # Data paths - UPDATE THESE
-    obj_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs"
-    images_dir = r"/Users/manasvardhan/Desktop/3D/3DGeneration/data/input_images"
-    
-    checkpoint_dir = "checkpoints_fixed"
-    log_dir = "logs_fixed"
-    output_dir = "output_fixed"
-    
-    # Training
-    batch_size = 1
-    num_epochs = 150  # More epochs needed
-    
-    # CRITICAL: Much lower learning rate
-    learning_rate = 1e-5  # 10x lower!
-    weight_decay = 0.01
-    
-    # Loss weights - MUCH STRONGER REGULARIZATION
-    lambda_chamfer = 1.0
-    lambda_edge = 2.0      # 4x stronger
-    lambda_smooth = 1.0    # 5x stronger  
-    lambda_normal = 0.5
-    
-    # Settings
-    freeze_image_encoder = False
-    hidden_dim = 1024
-    image_size = 512
-    num_workers = 0
-    
-    # Device
-    device = "mps" if torch.backends.mps.is_available() else \
-             "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # Logging
-    log_interval = 5
-    save_interval = 10
-    patience = 25
-    min_delta = 1e-5
-    
-    grad_clip_norm = 0.5  # Lower gradient clipping
-    seed = 42
-
-
-config = FixedConfig()
-torch.manual_seed(config.seed)
+from config import config  # ← Import from your config.py
 
 
 class MultiScaleTrainer:
@@ -80,10 +28,10 @@ class MultiScaleTrainer:
         print("MULTI-SCALE MESH TRAINING")
         print("="*70)
         print(f"Device: {config.device}")
-        print(f"Learning Rate: {config.learning_rate} (VERY LOW - prevents fragmentation)")
+        print(f"Learning Rate: {config.learning_rate_stage1}")
         print(f"Regularization:")
-        print(f"  Edge weight: {config.lambda_edge} (STRONG)")
-        print(f"  Smooth weight: {config.lambda_smooth} (STRONG)")
+        print(f"  Edge weight: {config.lambda_edge}")
+        print(f"  Smooth weight: {config.lambda_smooth}")
         print("="*70)
 
         # Load dataset
@@ -93,16 +41,16 @@ class MultiScaleTrainer:
         self.dataset = ShoeDataset(
             obj_dir=config.obj_dir,
             images_dir=config.images_dir,
-            verify_mappings=True,
+            views=['front', 'back', 'left', 'right', 'top', 'bottom'],
             image_size=config.image_size
         )
 
         if len(self.dataset) == 0:
-            raise ValueError(f"No data found!")
+            raise ValueError("No data found!")
 
         self.dataloader = DataLoader(
             self.dataset,
-            batch_size=config.batch_size,
+            batch_size=config.batch_size_stage1,
             shuffle=True,
             num_workers=config.num_workers,
             collate_fn=custom_collate_fn
@@ -120,19 +68,19 @@ class MultiScaleTrainer:
         total_params, trainable_params = self.model.count_parameters()
         print(f"✓ Parameters: {total_params:,} total, {trainable_params:,} trainable")
 
-        # Optimizer with very low LR
+        # Optimizer
         self.optimizer = optim.AdamW(
             self.model.get_trainable_parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
+            lr=config.learning_rate_stage1,
+            weight_decay=config.weight_decay_stage1,
             betas=(0.9, 0.999)
         )
 
-        # Cosine annealing with warmup
-        self.warmup_epochs = 10
+        # Scheduler with warmup
+        self.warmup_epochs = getattr(config, 'warmup_epochs', 10)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=config.num_epochs - self.warmup_epochs,
+            T_max=config.num_epochs_stage1 - self.warmup_epochs,
             eta_min=1e-7
         )
 
@@ -175,7 +123,7 @@ class MultiScaleTrainer:
         if epoch < self.warmup_epochs:
             lr_scale = (epoch + 1) / self.warmup_epochs
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] = self.config.learning_rate * lr_scale
+                param_group['lr'] = self.config.learning_rate_stage1 * lr_scale
 
         for batch_idx, batch in enumerate(self.dataloader):
             images = {k: v.to(self.config.device) for k, v in batch['images'].items()}
@@ -217,7 +165,7 @@ class MultiScaleTrainer:
             self.optimizer.zero_grad()
             loss.backward()
             
-            # Gradient clipping - CRITICAL
+            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(
                 self.model.get_trainable_parameters(), 
                 self.config.grad_clip_norm
@@ -232,7 +180,7 @@ class MultiScaleTrainer:
             # Logging
             if batch_idx % self.config.log_interval == 0:
                 progress = (batch_idx + 1) / num_batches * 100
-                print(f"  Epoch [{epoch+1}/{self.config.num_epochs}] "
+                print(f"  Epoch [{epoch+1}/{self.config.num_epochs_stage1}] "
                       f"Batch [{batch_idx+1}/{num_batches}] ({progress:.1f}%)")
                 print(f"    Loss: {loss.item():.6f}")
                 print(f"    Chamfer (C/M/F): {batch_loss_dict['chamfer_coarse']:.6f} / "
@@ -253,7 +201,7 @@ class MultiScaleTrainer:
 
         start_time = time.time()
 
-        for epoch in range(self.config.num_epochs):
+        for epoch in range(self.config.num_epochs_stage1):
             epoch_start = time.time()
 
             avg_loss, avg_losses = self.train_epoch(epoch)
@@ -329,34 +277,44 @@ class MultiScaleTrainer:
 def main():
     """Main entry point"""
     print("\n" + "="*70)
-    print("FIXED MULTI-SCALE MESH TRAINING")
+    print("MULTI-SCALE MESH TRAINING")
     print("="*70)
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Verify paths
+    # Verify paths from config
     if not Path(config.obj_dir).exists():
         print(f"✗ OBJ dir not found: {config.obj_dir}")
+        print("  Update paths in config.py")
         return
     if not Path(config.images_dir).exists():
         print(f"✗ Images dir not found: {config.images_dir}")
+        print("  Update paths in config.py")
         return
     
-    print("\nConfiguration:")
-    print(f"  LR: {config.learning_rate} (VERY LOW)")
-    print(f"  Edge regularization: {config.lambda_edge} (STRONG)")
-    print(f"  Smooth regularization: {config.lambda_smooth} (STRONG)")
-    print(f"  Grad clip: {config.grad_clip_norm}")
+    print("\nConfiguration from config.py:")
+    print(f"  OBJ dir:    {config.obj_dir}")
+    print(f"  Images dir: {config.images_dir}")
+    print(f"  LR:         {config.learning_rate_stage1}")
+    print(f"  Epochs:     {config.num_epochs_stage1}")
+    print(f"  Edge reg:   {config.lambda_edge}")
+    print(f"  Smooth reg: {config.lambda_smooth}")
+    print(f"  Device:     {config.device}")
 
+    # Set random seed
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(config.seed)
+
+    # Train
     trainer = MultiScaleTrainer(config)
     model = trainer.train()
 
     print(f"\n✅ Training complete!")
-    print("\nKey fixes applied:")
-    print("  • Multi-scale progressive refinement (coarse→mid→fine)")
-    print("  • Mesh-aware losses using actual connectivity")
-    print("  • Much stronger regularization (2-5x)")
-    print("  • Very low learning rate (1e-5)")
-    print("  • Bounded deformations at each scale")
+    print("\nKey features:")
+    print("  • Multi-scale progressive refinement")
+    print("  • Mesh-aware losses")
+    print("  • Strong regularization")
+    print("  • All settings from config.py")
 
 
 if __name__ == "__main__":
