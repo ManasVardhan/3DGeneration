@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 import json
 
-from geometry_model_fixed import ImprovedGeometryModel, multi_scale_geometry_loss
+from models.geometry_model import ImprovedGeometryModel, multi_scale_geometry_loss
 
 
 class FixedConfig:

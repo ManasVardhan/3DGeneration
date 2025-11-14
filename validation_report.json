@@ -1,0 +1,10 @@
+{
+  "statistics": {
+    "total_objs": 101,
+    "total_images": 606,
+    "valid_pairs": 101
+  },
+  "issues": {},
+  "warnings": {},
+  "passed": true
+}

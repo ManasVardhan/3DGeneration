@@ -1,0 +1,61 @@
+Loaded paths from config.py
+
+======================================================================
+DATA VALIDATION
+======================================================================
+OBJ dir:    /Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs
+Images dir: /Users/manasvardhan/Desktop/3D/3DGeneration/data/input_images
+======================================================================
+
+TEST 1: Directory Existence
+----------------------------------------------------------------------
+  OBJ directory:    EXISTS
+  Images directory: EXISTS
+
+TEST 2A: Scanning OBJ Files
+----------------------------------------------------------------------
+  Found 101 OBJ files
+  Example: 61
+
+TEST 2B: Scanning Images
+----------------------------------------------------------------------
+  Found 606 images for 101 shoes
+  Example: 23 has 6 views
+
+TEST 3: X-Y Mapping
+----------------------------------------------------------------------
+  Valid pairs:     101
+  Incomplete sets: 0
+
+TEST 4: OBJ Validation
+----------------------------------------------------------------------
+  Validating 5 samples...
+    Valid:   5/5
+    Corrupt: 0
+    Empty:   0
+
+TEST 5: Image Validation
+----------------------------------------------------------------------
+  Validating 5 samples...
+    Valid:       30
+    Corrupt:     0
+    Resolutions: {(512, 512)}
+
+TEST 6: Data Quality
+----------------------------------------------------------------------
+  GOOD: 101 pairs
+
+======================================================================
+VALIDATION REPORT
+======================================================================
+
+Statistics:
+  Total OBJs:      101
+  Total images:    606
+  Valid pairs:     101
+
+======================================================================
+PASSED - Data is ready
+======================================================================
+
+Report saved to: validation_report.json

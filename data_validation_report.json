@@ -1,0 +1,43 @@
+{
+  "statistics": {
+    "total_objs": 101,
+    "total_images": 606,
+    "shoes_with_images": 101,
+    "valid_pairs": 101,
+    "obj_validation": {
+      "valid": 9,
+      "corrupt": 0,
+      "empty": 0,
+      "too_large": 1,
+      "non_manifold": 10,
+      "vertex_counts": [
+        55532,
+        56535,
+        40530,
+        66851,
+        54958,
+        28080,
+        27038,
+        122512,
+        56045,
+        27518
+      ],
+      "face_counts": [
+        100000,
+        100000,
+        72044,
+        122454,
+        99999,
+        50000,
+        50000,
+        196816,
+        100000,
+        50000
+      ]
+    },
+    "image_validation": {
+      "valid": 60,
+      "corrupt": 0,
+      "wrong_size": 0,
+      "grayscale": 0,
+      "resolutions": 

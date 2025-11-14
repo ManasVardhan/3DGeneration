@@ -1,0 +1,282 @@
+======================================================================
+DATA PIPELINE INSPECTION
+======================================================================
+
+📋 Configuration:
+   OBJ dir:    /Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs
+   Images dir: /Users/manasvardhan/Desktop/3D/3DGeneration/data/input_images
+   Image size: 512
+   Device:     mps
+
+📦 Inspecting sample 0: 100
+======================================================================
+
+======================================================================
+📸 INPUT X: IMAGES
+======================================================================
+
+FRONT:
+  Shape:     (3, 512, 512) (C, H, W)
+  Dtype:     torch.float32
+  Device:    cpu (before model)
+  Min value: 0.086275
+  Max value: 0.807843
+  Mean:      0.740403
+  Std:       0.104298
+  ✓ Values in correct [0, 1] range
+  Sample pixels (R,G,B):
+    Top-left:     [0.7608, 0.7608, 0.7608]
+    Center:       [0.3647, 0.3725, 0.6314]
+    Bottom-right: [0.7647, 0.7647, 0.7647]
+
+BACK:
+  Shape:     (3, 512, 512) (C, H, W)
+  Dtype:     torch.float32
+  Device:    cpu (before model)
+  Min value: 0.062745
+  Max value: 0.788235
+  Mean:      0.727784
+  Std:       0.131830
+  ✓ Values in correct [0, 1] range
+  Sample pixels (R,G,B):
+    Top-left:     [0.7608, 0.7608, 0.7608]
+    Center:       [0.1294, 0.1294, 0.1294]
+    Bottom-right: [0.7647, 0.7647, 0.7647]
+
+LEFT:
+  Shape:     (3, 512, 512) (C, H, W)
+  Dtype:     torch.float32
+  Device:    cpu (before model)
+  Min value: 0.027451
+  Max value: 0.811765
+  Mean:      0.717876
+  Std:       0.142505
+  ✓ Values in correct [0, 1] range
+  Sample pixels (R,G,B):
+    Top-left:     [0.7608, 0.7608, 0.7608]
+    Center:       [0.1961, 0.2118, 0.4863]
+    Bottom-right: [0.7647, 0.7647, 0.7647]
+
+RIGHT:
+  Shape:     (3, 512, 512) (C, H, W)
+  Dtype:     torch.float32
+  Device:    cpu (before model)
+  Min value: 0.062745
+  Max value: 0.776471
+  Mean:      0.715769
+  Std:       0.146926
+  ✓ Values in correct [0, 1] range
+  Sample pixels (R,G,B):
+    Top-left:     [0.7608, 0.7608, 0.7608]
+    Center:       [0.3137, 0.3373, 0.6000]
+    Bottom-right: [0.7647, 0.7647, 0.7647]
+
+TOP:
+  Shape:     (3, 512, 512) (C, H, W)
+  Dtype:     torch.float32
+  Device:    cpu (before model)
+  Min value: 0.101961
+  Max value: 0.823529
+  Mean:      0.720638
+  Std:       0.135441
+  ✓ Values in correct [0, 1] range
+  Sample pixels (R,G,B):
+    Top-left:     [0.7608, 0.7608, 0.7608]
+    Center:       [0.2000, 0.2039, 0.2275]
+    Bottom-right: [0.7647, 0.7647, 0.7647]
+
+BOTTOM:
+  Shape:     (3, 512, 512) (C, H, W)
+  Dtype:     torch.float32
+  Device:    cpu (before model)
+  Min value: 0.078431
+  Max value: 0.768627
+  Mean:      0.701216
+  Std:       0.172069
+  ✓ Values in correct [0, 1] range
+  Sample pixels (R,G,B):
+    Top-left:     [0.7608, 0.7608, 0.7608]
+    Center:       [0.1882, 0.4588, 0.4510]
+    Bottom-right: [0.7647, 0.7647, 0.7647]
+
+📊 OVERALL IMAGE STATISTICS:
+  Total shape:  (6, 3, 512, 512) (Views, C, H, W)
+  Global mean:  0.720614
+  Global std:   0.140804
+  Global min:   0.027451
+  Global max:   0.823529
+
+======================================================================
+🎯 OUTPUT Y: VERTICES (Ground Truth)
+======================================================================
+
+Source: /Users/manasvardhan/Desktop/3D/3DGeneration/data/OBJs/100/Jordan 1 mid.obj
+  Shape:        (97332, 3) (N, 3)
+  Dtype:        torch.float32
+  Num vertices: 97332
+
+📊 VERTEX STATISTICS:
+  X-axis:
+    Min:  -0.993770
+    Max:  0.618699
+    Mean: -0.000000
+    Std:  0.427783
+  Y-axis:
+    Min:  -0.508334
+    Max:  0.515814
+    Mean: 0.000000
+    Std:  0.245586
+  Z-axis:
+    Min:  -0.483893
+    Max:  0.479884
+    Mean: -0.000000
+    Std:  0.221786
+
+📏 NORMALIZATION CHECK:
+  Distance from origin (L2 norm):
+    Min:  0.226121
+    Max:  1.000000
+    Mean: 0.514210
+  ✓ Vertices normalized to unit sphere
+
+📍 SAMPLE VERTICES:
+  Vertex     0: [ 0.0863,  0.2935,  0.1062] (dist: 0.3238)
+  Vertex 24333: [-0.1948,  0.2014, -0.1233] (dist: 0.3062)
+  Vertex 48666: [ 0.2982,  0.0877,  0.4140] (dist: 0.5177)
+  Vertex 72999: [-0.3986, -0.0195, -0.4538] (dist: 0.6043)
+  Vertex    -1: [ 0.4034,  0.0547, -0.0051] (dist: 0.4071)
+  ⚠️  WARNING: 12575 duplicate vertices found!
+
+======================================================================
+🔺 OUTPUT Y: FACES (Topology)
+======================================================================
+
+  Shape:     (169514, 3) (F, 3)
+  Dtype:     torch.int64
+  Num faces: 169514
+
+📊 FACE STATISTICS:
+  Min vertex index: 0
+  Max vertex index: 97331
+
+📍 SAMPLE FACES (vertex indices):
+  Face     0: [    0,     1,     2]
+  Face 42378: [22881, 23364, 23325]
+  Face 84757: [46194, 46448, 45892]
+  Face 127135: [70342, 70370, 70468]
+  Face    -1: [97327, 97326, 97330]
+  ✓ No degenerate faces
+
+======================================================================
+🎨 OUTPUT Y: VERTEX COLORS
+======================================================================
+
+  Shape: (97332, 3) (N, 3)
+  Dtype: torch.float32
+
+📊 COLOR STATISTICS:
+  R-channel:
+    Min:  0.000000
+    Max:  0.937255
+    Mean: 0.188233
+  G-channel:
+    Min:  0.000000
+    Max:  0.933333
+    Mean: 0.275832
+  B-channel:
+    Min:  0.000000
+    Max:  0.988235
+    Mean: 0.375034
+  ✓ Colors in correct [0, 1] range
+
+📍 SAMPLE COLORS (R, G, B):
+  Vertex     0: [0.1333, 0.0941, 0.1255]
+  Vertex 24333: [0.1373, 0.0902, 0.4196]
+  Vertex 48666: [0.1412, 0.2667, 0.3255]
+  Vertex 72999: [0.7804, 0.7961, 0.8000]
+  Vertex    -1: [0.0196, 0.0039, 0.0941]
+
+======================================================================
+📐 OUTPUT Y: VERTEX NORMALS
+======================================================================
+
+  Shape: (97332, 3) (N, 3)
+  Dtype: torch.float32
+
+📏 NORMAL VECTOR LENGTHS:
+  Min:  1.000000
+  Max:  1.000000
+  Mean: 1.000000
+  ✓ Normals properly normalized
+
+📍 SAMPLE NORMALS (X, Y, Z):
+  Vertex     0: [ 0.6352, -0.6882,  0.3506] (len: 1.0000)
+  Vertex 24333: [-0.5519,  0.3850, -0.7397] (len: 1.0000)
+  Vertex 48666: [ 0.3775, -0.0656,  0.9237] (len: 1.0000)
+  Vertex 72999: [ 0.0440,  0.5093, -0.8594] (len: 1.0000)
+  Vertex    -1: [-0.8704, -0.4539,  0.1908] (len: 1.0000)
+
+======================================================================
+📦 BATCH COLLATION (DataLoader)
+======================================================================
+
+Batch structure:
+  Keys: ['images', 'vertices', 'faces', 'vertex_colors', 'vertex_normals', 'shoe_id', 'obj_path']
+
+📸 Batched Images:
+  front: (1, 3, 512, 512) (B, C, H, W)
+  back: (1, 3, 512, 512) (B, C, H, W)
+  left: (1, 3, 512, 512) (B, C, H, W)
+  right: (1, 3, 512, 512) (B, C, H, W)
+  top: (1, 3, 512, 512) (B, C, H, W)
+  bottom: (1, 3, 512, 512) (B, C, H, W)
+
+🎯 Batched Geometry:
+  vertices: List of 1 tensors
+    [0] shape: (97332, 3)
+  faces: List of 1 tensors
+    [0] shape: (169514, 3)
+
+✓ Batch collation successful
+
+======================================================================
+🤖 MODEL FORWARD PASS SIMULATION
+======================================================================
+
+📥 Model Inputs:
+  Architecture: Multi-scale (NEW)
+  Device: mps
+  front: (1, 3, 512, 512) on mps:0
+  back: (1, 3, 512, 512) on mps:0
+
+🔮 Running forward pass...
+
+📤 Model Outputs (Multi-scale):
+  Coarse vertices: (1, 162, 3)
+  Mid vertices:    (1, 642, 3)
+  Fine vertices:   (1, 2562, 3)
+  Normals:         (1, 2562, 3)
+
+📊 PREDICTED VERTICES (Fine level):
+  X-axis:
+    Min:  -1.010675
+    Max:  1.042757
+    Mean: -0.000878
+    Std:  0.578609
+  Y-axis:
+    Min:  -0.989646
+    Max:  1.018702
+    Mean: -0.000149
+    Std:  0.578125
+  Z-axis:
+    Min:  -1.008523
+    Max:  1.021642
+    Mean: 0.002117
+    Std:  0.578193
+
+📏 COMPARISON WITH GROUND TRUTH:
+  GT vertices:   97332
+  Pred vertices: 2562
+  Approx Chamfer (100 pts): 0.548841
+
+✓ Forward pass completed successfully
